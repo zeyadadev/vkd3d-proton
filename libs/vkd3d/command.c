@@ -98,6 +98,37 @@ static bool vkd3d_should_emit_runtime_command_log(void)
     return InterlockedIncrement(&runtime_command_log_count) <= 512;
 }
 
+static bool vkd3d_should_force_debug_clear(void)
+{
+    char env[64];
+
+    return (vkd3d_get_env_var("VKD3D_FORCE_DEBUG_CLEAR", env, sizeof(env))
+            && strcmp(env, "0") && strcmp(env, "false") && strcmp(env, "FALSE"));
+}
+
+static bool vkd3d_should_force_debug_clear_for_rtv(const struct d3d12_command_list *list,
+        const struct d3d12_rtv_desc *rtv_desc, UINT rect_count)
+{
+    DXGI_FORMAT dxgi_format = rtv_desc->format->dxgi_format;
+
+    if (!vkd3d_should_force_debug_clear())
+        return false;
+
+    if (rect_count)
+        return false;
+
+    if (list->dsv.resource)
+        return false;
+
+    if (!rtv_desc->resource || !rtv_desc->view)
+        return false;
+
+    if (rtv_desc->width != list->fb_width || rtv_desc->height != list->fb_height)
+        return false;
+
+    return dxgi_format == DXGI_FORMAT_B8G8R8A8_UNORM || dxgi_format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+}
+
 static void vkd3d_log_runtime_rt_bindings(const struct d3d12_command_list *list, unsigned int render_target_descriptor_count)
 {
     unsigned int i;
@@ -10339,38 +10370,50 @@ static void STDMETHODCALLTYPE d3d12_command_list_ClearRenderTargetView(d3d12_com
 {
     struct d3d12_command_list *list = impl_from_ID3D12GraphicsCommandList(iface);
     const struct d3d12_rtv_desc *rtv_desc = d3d12_rtv_desc_from_cpu_handle(rtv);
+    static const float debug_color[4] = {1.0f, 0.0f, 1.0f, 1.0f};
+    const float *clear_color = color;
     VkClearValue clear_value;
 
     TRACE("iface %p, rtv %#lx, color %p, rect_count %u, rects %p.\n",
             iface, rtv.ptr, color, rect_count, rects);
 
+    if (vkd3d_should_force_debug_clear_for_rtv(list, rtv_desc, rect_count))
+    {
+        clear_color = debug_color;
+
+        INFO("Forcing debug clear color to [%g, %g, %g, %g] for RTV format %s, %ux%u, rects %u.\n",
+                clear_color[0], clear_color[1], clear_color[2], clear_color[3],
+                debug_dxgi_format(rtv_desc->format->dxgi_format),
+                rtv_desc->width, rtv_desc->height, rect_count);
+    }
+
     if (rtv_desc->format->type == VKD3D_FORMAT_TYPE_UINT)
     {
-        clear_value.color.uint32[0] = max(0, color[0]);
-        clear_value.color.uint32[1] = max(0, color[1]);
-        clear_value.color.uint32[2] = max(0, color[2]);
-        clear_value.color.uint32[3] = max(0, color[3]);
+        clear_value.color.uint32[0] = max(0, clear_color[0]);
+        clear_value.color.uint32[1] = max(0, clear_color[1]);
+        clear_value.color.uint32[2] = max(0, clear_color[2]);
+        clear_value.color.uint32[3] = max(0, clear_color[3]);
     }
     else if (rtv_desc->format->type == VKD3D_FORMAT_TYPE_SINT)
     {
-        clear_value.color.int32[0] = color[0];
-        clear_value.color.int32[1] = color[1];
-        clear_value.color.int32[2] = color[2];
-        clear_value.color.int32[3] = color[3];
+        clear_value.color.int32[0] = clear_color[0];
+        clear_value.color.int32[1] = clear_color[1];
+        clear_value.color.int32[2] = clear_color[2];
+        clear_value.color.int32[3] = clear_color[3];
     }
     else
     {
-        clear_value.color.float32[0] = color[0];
-        clear_value.color.float32[1] = color[1];
-        clear_value.color.float32[2] = color[2];
-        clear_value.color.float32[3] = color[3];
+        clear_value.color.float32[0] = clear_color[0];
+        clear_value.color.float32[1] = clear_color[1];
+        clear_value.color.float32[2] = clear_color[2];
+        clear_value.color.float32[3] = clear_color[3];
     }
 
     if (vkd3d_should_emit_runtime_command_log())
     {
         INFO("ClearRenderTargetView: format %s, color [%g, %g, %g, %g], rects %u.\n",
                 debug_dxgi_format(rtv_desc->format->dxgi_format),
-                color[0], color[1], color[2], color[3], rect_count);
+                clear_color[0], clear_color[1], clear_color[2], clear_color[3], rect_count);
     }
 
     d3d12_command_list_clear_attachment(list, rtv_desc->resource, rtv_desc->view,
