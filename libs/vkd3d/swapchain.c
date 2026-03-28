@@ -196,6 +196,14 @@ static bool vkd3d_should_force_swapchain_copy(void)
             && strcmp(env, "0") && strcmp(env, "false") && strcmp(env, "FALSE"));
 }
 
+static bool vkd3d_should_force_swapchain_copy_source_magenta(void)
+{
+    char env[64];
+
+    return (vkd3d_get_env_var("VKD3D_FORCE_SWAPCHAIN_COPY_SOURCE_MAGENTA", env, sizeof(env))
+            && strcmp(env, "0") && strcmp(env, "false") && strcmp(env, "FALSE"));
+}
+
 static void dxgi_vk_swap_chain_drain_queue(struct dxgi_vk_swap_chain *chain)
 {
     const struct vkd3d_vk_device_procs *vk_procs = &chain->queue->device->vk_procs;
@@ -1537,16 +1545,22 @@ static void dxgi_vk_swap_chain_record_render_pass(struct dxgi_vk_swap_chain *cha
 
     if (!blank_present && vkd3d_should_force_swapchain_copy() && chain->present.transfer_dst_enabled)
     {
+        VkImageSubresourceRange source_subresource_range;
         VkImageMemoryBarrier2 transfer_barriers[2];
         VkDependencyInfo transfer_dep_info;
+        VkImageLayout source_clear_layout;
         VkImageLayout source_copy_layout;
         VkImageLayout source_sample_layout;
+        VkClearColorValue clear_value;
         uint32_t src_width, src_height;
+        bool force_source_magenta;
         bool use_copy;
 
         src_width = (uint32_t)resource->desc.Width;
         src_height = resource->desc.Height;
+        force_source_magenta = vkd3d_should_force_swapchain_copy_source_magenta();
         source_sample_layout = d3d12_resource_pick_layout(resource, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        source_clear_layout = d3d12_resource_pick_layout(resource, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         source_copy_layout = d3d12_resource_pick_layout(resource, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
         use_copy = resource->format->vk_format == chain->present.backbuffer_format &&
                 src_width == chain->present.backbuffer_width &&
@@ -1575,9 +1589,9 @@ static void dxgi_vk_swap_chain_record_render_pass(struct dxgi_vk_swap_chain *cha
         transfer_barriers[1].srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
         transfer_barriers[1].srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
         transfer_barriers[1].dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
-        transfer_barriers[1].dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+        transfer_barriers[1].dstAccessMask = force_source_magenta ? VK_ACCESS_2_TRANSFER_WRITE_BIT : VK_ACCESS_2_TRANSFER_READ_BIT;
         transfer_barriers[1].oldLayout = source_sample_layout;
-        transfer_barriers[1].newLayout = source_copy_layout;
+        transfer_barriers[1].newLayout = force_source_magenta ? source_clear_layout : source_copy_layout;
         transfer_barriers[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         transfer_barriers[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         transfer_barriers[1].image = resource->res.vk_image;
@@ -1591,6 +1605,46 @@ static void dxgi_vk_swap_chain_record_render_pass(struct dxgi_vk_swap_chain *cha
         transfer_dep_info.pImageMemoryBarriers = transfer_barriers;
 
         VK_CALL(vkCmdPipelineBarrier2(vk_cmd, &transfer_dep_info));
+
+        if (force_source_magenta)
+        {
+            VkImageMemoryBarrier2 source_clear_to_copy_barrier;
+            VkDependencyInfo source_clear_dep_info;
+
+            memset(&clear_value, 0, sizeof(clear_value));
+            clear_value.float32[0] = 1.0f;
+            clear_value.float32[2] = 1.0f;
+            clear_value.float32[3] = 1.0f;
+
+            memset(&source_subresource_range, 0, sizeof(source_subresource_range));
+            source_subresource_range.aspectMask = resource->format->vk_aspect_mask;
+            source_subresource_range.levelCount = VK_REMAINING_MIP_LEVELS;
+            source_subresource_range.layerCount = VK_REMAINING_ARRAY_LAYERS;
+
+            INFO("Clearing source user image %u to magenta before direct swapchain copy.\n",
+                    chain->request.user_index);
+            VK_CALL(vkCmdClearColorImage(vk_cmd, resource->res.vk_image, source_clear_layout,
+                    &clear_value, 1, &source_subresource_range));
+
+            memset(&source_clear_to_copy_barrier, 0, sizeof(source_clear_to_copy_barrier));
+            source_clear_to_copy_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+            source_clear_to_copy_barrier.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+            source_clear_to_copy_barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+            source_clear_to_copy_barrier.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+            source_clear_to_copy_barrier.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+            source_clear_to_copy_barrier.oldLayout = source_clear_layout;
+            source_clear_to_copy_barrier.newLayout = source_copy_layout;
+            source_clear_to_copy_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            source_clear_to_copy_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            source_clear_to_copy_barrier.image = resource->res.vk_image;
+            source_clear_to_copy_barrier.subresourceRange = source_subresource_range;
+
+            memset(&source_clear_dep_info, 0, sizeof(source_clear_dep_info));
+            source_clear_dep_info.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+            source_clear_dep_info.imageMemoryBarrierCount = 1;
+            source_clear_dep_info.pImageMemoryBarriers = &source_clear_to_copy_barrier;
+            VK_CALL(vkCmdPipelineBarrier2(vk_cmd, &source_clear_dep_info));
+        }
 
         if (use_copy)
         {
