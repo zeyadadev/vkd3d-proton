@@ -3451,6 +3451,89 @@ static HRESULT d3d12_device_get_format_support(struct d3d12_device *device, D3D1
     return S_OK;
 }
 
+static bool vkd3d_should_log_feature_queries(void)
+{
+    char env[64];
+
+    return vkd3d_get_env_var("VKD3D_LOG_FEATURE_QUERIES", env, sizeof(env)) &&
+            strcmp(env, "0") && strcmp(env, "false") && strcmp(env, "FALSE");
+}
+
+static const char *debug_d3d12_feature(D3D12_FEATURE feature)
+{
+    switch (feature)
+    {
+        case D3D12_FEATURE_D3D12_OPTIONS:
+            return "D3D12_OPTIONS";
+        case D3D12_FEATURE_ARCHITECTURE:
+            return "ARCHITECTURE";
+        case D3D12_FEATURE_FEATURE_LEVELS:
+            return "FEATURE_LEVELS";
+        case D3D12_FEATURE_FORMAT_SUPPORT:
+            return "FORMAT_SUPPORT";
+        case D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS:
+            return "MULTISAMPLE_QUALITY_LEVELS";
+        case D3D12_FEATURE_FORMAT_INFO:
+            return "FORMAT_INFO";
+        case D3D12_FEATURE_GPU_VIRTUAL_ADDRESS_SUPPORT:
+            return "GPU_VIRTUAL_ADDRESS_SUPPORT";
+        case D3D12_FEATURE_SHADER_MODEL:
+            return "SHADER_MODEL";
+        case D3D12_FEATURE_D3D12_OPTIONS1:
+            return "D3D12_OPTIONS1";
+        case D3D12_FEATURE_PROTECTED_RESOURCE_SESSION_SUPPORT:
+            return "PROTECTED_RESOURCE_SESSION_SUPPORT";
+        case D3D12_FEATURE_ROOT_SIGNATURE:
+            return "ROOT_SIGNATURE";
+        case D3D12_FEATURE_ARCHITECTURE1:
+            return "ARCHITECTURE1";
+        case D3D12_FEATURE_D3D12_OPTIONS2:
+            return "D3D12_OPTIONS2";
+        case D3D12_FEATURE_SHADER_CACHE:
+            return "SHADER_CACHE";
+        case D3D12_FEATURE_COMMAND_QUEUE_PRIORITY:
+            return "COMMAND_QUEUE_PRIORITY";
+        case D3D12_FEATURE_D3D12_OPTIONS3:
+            return "D3D12_OPTIONS3";
+        case D3D12_FEATURE_EXISTING_HEAPS:
+            return "EXISTING_HEAPS";
+        case D3D12_FEATURE_D3D12_OPTIONS4:
+            return "D3D12_OPTIONS4";
+        case D3D12_FEATURE_SERIALIZATION:
+            return "SERIALIZATION";
+        case D3D12_FEATURE_CROSS_NODE:
+            return "CROSS_NODE";
+        case D3D12_FEATURE_D3D12_OPTIONS5:
+            return "D3D12_OPTIONS5";
+        case D3D12_FEATURE_D3D12_OPTIONS6:
+            return "D3D12_OPTIONS6";
+        case D3D12_FEATURE_D3D12_OPTIONS7:
+            return "D3D12_OPTIONS7";
+        case D3D12_FEATURE_D3D12_OPTIONS8:
+            return "D3D12_OPTIONS8";
+        case D3D12_FEATURE_D3D12_OPTIONS9:
+            return "D3D12_OPTIONS9";
+        case D3D12_FEATURE_D3D12_OPTIONS10:
+            return "D3D12_OPTIONS10";
+        case D3D12_FEATURE_D3D12_OPTIONS11:
+            return "D3D12_OPTIONS11";
+        case D3D12_FEATURE_D3D12_OPTIONS12:
+            return "D3D12_OPTIONS12";
+        case D3D12_FEATURE_D3D12_OPTIONS13:
+            return "D3D12_OPTIONS13";
+        case D3D12_FEATURE_D3D12_OPTIONS14:
+            return "D3D12_OPTIONS14";
+        case D3D12_FEATURE_D3D12_OPTIONS15:
+            return "D3D12_OPTIONS15";
+        case D3D12_FEATURE_D3D12_OPTIONS16:
+            return "D3D12_OPTIONS16";
+        case D3D12_FEATURE_QUERY_META_COMMAND:
+            return "QUERY_META_COMMAND";
+        default:
+            return "UNKNOWN";
+    }
+}
+
 static HRESULT STDMETHODCALLTYPE d3d12_device_CheckFeatureSupport(d3d12_device_iface *iface,
         D3D12_FEATURE feature, void *feature_data, UINT feature_data_size)
 {
@@ -3458,6 +3541,10 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_CheckFeatureSupport(d3d12_device_i
 
     TRACE("iface %p, feature %#x, feature_data %p, feature_data_size %u.\n",
             iface, feature, feature_data, feature_data_size);
+
+    if (vkd3d_should_log_feature_queries())
+        INFO("CheckFeatureSupport(%s/%#x, size=%u).\n",
+                debug_d3d12_feature(feature), feature, feature_data_size);
 
     switch (feature)
     {
@@ -3489,6 +3576,12 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_CheckFeatureSupport(d3d12_device_i
             TRACE("VP and RT array index from any shader without GS emulation %#x.\n",
                     data->VPAndRTArrayIndexFromAnyShaderFeedingRasterizerSupportedWithoutGSEmulation);
             TRACE("Resource heap tier %#x.\n", data->ResourceHeapTier);
+            if (vkd3d_should_log_feature_queries())
+                INFO("D3D12_OPTIONS => binding tier %u, tiled tier %u, typed UAV loads %u, "
+                        "ROVs %u, conservative raster %u, heap tier %u.\n",
+                        data->ResourceBindingTier, data->TiledResourcesTier,
+                        data->TypedUAVLoadAdditionalFormats, data->ROVsSupported,
+                        data->ConservativeRasterizationTier, data->ResourceHeapTier);
             return S_OK;
         }
 
@@ -3517,6 +3610,9 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_CheckFeatureSupport(d3d12_device_i
 
             TRACE("Tile based renderer %#x, UMA %#x, cache coherent UMA %#x.\n",
                     data->TileBasedRenderer, data->UMA, data->CacheCoherentUMA);
+            if (vkd3d_should_log_feature_queries())
+                INFO("ARCHITECTURE => tile-based %#x, UMA %#x, cache-coherent UMA %#x.\n",
+                        data->TileBasedRenderer, data->UMA, data->CacheCoherentUMA);
             return S_OK;
         }
 
@@ -3534,6 +3630,13 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_CheckFeatureSupport(d3d12_device_i
             if (!data->NumFeatureLevels)
                 return E_INVALIDARG;
 
+            if (vkd3d_should_log_feature_queries())
+            {
+                for (i = 0; i < data->NumFeatureLevels; ++i)
+                    INFO("FEATURE_LEVELS request[%u] = %#x.\n",
+                            i, data->pFeatureLevelsRequested[i]);
+            }
+
             data->MaxSupportedFeatureLevel = 0;
             for (i = 0; i < data->NumFeatureLevels; ++i)
             {
@@ -3543,6 +3646,8 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_CheckFeatureSupport(d3d12_device_i
             }
 
             TRACE("Max supported feature level %#x.\n", data->MaxSupportedFeatureLevel);
+            if (vkd3d_should_log_feature_queries())
+                INFO("FEATURE_LEVELS => max supported %#x.\n", data->MaxSupportedFeatureLevel);
             return S_OK;
         }
 
@@ -3563,6 +3668,9 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_CheckFeatureSupport(d3d12_device_i
             vkd3d_determine_format_support_for_feature_level(device, data);
 
             TRACE("Format %#x, support1 %#x, support2 %#x.\n", data->Format, data->Support1, data->Support2);
+            if (vkd3d_should_log_feature_queries())
+                INFO("FORMAT_SUPPORT %#x => support1 %#x, support2 %#x.\n",
+                        data->Format, data->Support1, data->Support2);
             return S_OK;
         }
 
@@ -3607,6 +3715,9 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_CheckFeatureSupport(d3d12_device_i
             data->PlaneCount = format->plane_count;
 
             TRACE("Format %#x, plane count %"PRIu8".\n", data->Format, data->PlaneCount);
+            if (vkd3d_should_log_feature_queries())
+                INFO("FORMAT_INFO %#x => plane count %"PRIu8".\n",
+                        data->Format, data->PlaneCount);
             return S_OK;
         }
 
@@ -3626,12 +3737,16 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_CheckFeatureSupport(d3d12_device_i
 
             TRACE("Max GPU virtual address bits per resource %u, Max GPU virtual address bits per process %u.\n",
                     data->MaxGPUVirtualAddressBitsPerResource, data->MaxGPUVirtualAddressBitsPerProcess);
+            if (vkd3d_should_log_feature_queries())
+                INFO("GPU_VIRTUAL_ADDRESS_SUPPORT => per-resource %u, per-process %u.\n",
+                        data->MaxGPUVirtualAddressBitsPerResource, data->MaxGPUVirtualAddressBitsPerProcess);
             return S_OK;
         }
 
         case D3D12_FEATURE_SHADER_MODEL:
         {
             D3D12_FEATURE_DATA_SHADER_MODEL *data = feature_data;
+            D3D_SHADER_MODEL requested_shader_model;
 
             if (feature_data_size != sizeof(*data))
             {
@@ -3639,9 +3754,13 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_CheckFeatureSupport(d3d12_device_i
                 return E_INVALIDARG;
             }
 
+            requested_shader_model = data->HighestShaderModel;
             TRACE("Request shader model %#x.\n", data->HighestShaderModel);
             data->HighestShaderModel = min(data->HighestShaderModel, device->d3d12_caps.max_shader_model);
             TRACE("Shader model %#x.\n", data->HighestShaderModel);
+            if (vkd3d_should_log_feature_queries())
+                INFO("SHADER_MODEL => requested %#x, returning %#x.\n",
+                        requested_shader_model, data->HighestShaderModel);
             return S_OK;
         }
 
@@ -3663,6 +3782,11 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_CheckFeatureSupport(d3d12_device_i
             TRACE("Total lane count %u.\n", data->TotalLaneCount);
             TRACE("Expanded compute resource states %#x.\n", data->ExpandedComputeResourceStates);
             TRACE("Int64 shader ops %#x.\n", data->Int64ShaderOps);
+            if (vkd3d_should_log_feature_queries())
+                INFO("D3D12_OPTIONS1 => wave ops %u, lane min %u, lane max %u, total lanes %u, "
+                        "int64 ops %u.\n",
+                        data->WaveOps, data->WaveLaneCountMin, data->WaveLaneCountMax,
+                        data->TotalLaneCount, data->Int64ShaderOps);
             return S_OK;
         }
 
@@ -3690,6 +3814,7 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_CheckFeatureSupport(d3d12_device_i
         case D3D12_FEATURE_ROOT_SIGNATURE:
         {
             D3D12_FEATURE_DATA_ROOT_SIGNATURE *data = feature_data;
+            D3D_ROOT_SIGNATURE_VERSION requested_root_signature;
 
             if (feature_data_size != sizeof(*data))
             {
@@ -3703,10 +3828,14 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_CheckFeatureSupport(d3d12_device_i
                 return E_INVALIDARG;
             }
 
+            requested_root_signature = data->HighestVersion;
             TRACE("Root signature requested %#x.\n", data->HighestVersion);
             data->HighestVersion = min(data->HighestVersion, D3D_ROOT_SIGNATURE_VERSION_1_1);
 
             TRACE("Root signature version %#x.\n", data->HighestVersion);
+            if (vkd3d_should_log_feature_queries())
+                INFO("ROOT_SIGNATURE => requested %#x, returning %#x.\n",
+                        requested_root_signature, data->HighestVersion);
             return S_OK;
         }
 
@@ -3736,6 +3865,9 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_CheckFeatureSupport(d3d12_device_i
 
             TRACE("Tile based renderer %#x, UMA %#x, cache coherent UMA %#x, isolated MMU %#x.\n",
                     data->TileBasedRenderer, data->UMA, data->CacheCoherentUMA, data->IsolatedMMU);
+            if (vkd3d_should_log_feature_queries())
+                INFO("ARCHITECTURE1 => tile-based %#x, UMA %#x, cache-coherent UMA %#x, isolated MMU %#x.\n",
+                        data->TileBasedRenderer, data->UMA, data->CacheCoherentUMA, data->IsolatedMMU);
             return S_OK;
         }
 
@@ -3753,6 +3885,9 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_CheckFeatureSupport(d3d12_device_i
 
             TRACE("Depth bounds test %#x.\n", data->DepthBoundsTestSupported);
             TRACE("Programmable sample positions tier %u.\n", data->ProgrammableSamplePositionsTier);
+            if (vkd3d_should_log_feature_queries())
+                INFO("D3D12_OPTIONS2 => depth bounds %u, programmable sample positions tier %u.\n",
+                        data->DepthBoundsTestSupported, data->ProgrammableSamplePositionsTier);
             return S_OK;
         }
 
@@ -3813,6 +3948,12 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_CheckFeatureSupport(d3d12_device_i
             TRACE("Write buffer immediate support flags %#x.", data->WriteBufferImmediateSupportFlags);
             TRACE("View instancing tier %u.", data->ViewInstancingTier);
             TRACE("Barycentrics %#x.", data->BarycentricsSupported);
+            if (vkd3d_should_log_feature_queries())
+                INFO("D3D12_OPTIONS3 => copy queue timestamps %u, fully typed casts %u, "
+                        "write-buffer flags %#x, view instancing tier %u, barycentrics %u.\n",
+                        data->CopyQueueTimestampQueriesSupported, data->CastingFullyTypedFormatSupported,
+                        data->WriteBufferImmediateSupportFlags, data->ViewInstancingTier,
+                        data->BarycentricsSupported);
             return S_OK;
         }
 
@@ -3849,6 +3990,10 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_CheckFeatureSupport(d3d12_device_i
             TRACE("64kB alignment for MSAA textures %#x.\n", data->MSAA64KBAlignedTextureSupported);
             TRACE("Shared resource compatibility tier %u.\n", data->SharedResourceCompatibilityTier);
             TRACE("Native 16-bit shader ops %#x.\n", data->Native16BitShaderOpsSupported);
+            if (vkd3d_should_log_feature_queries())
+                INFO("D3D12_OPTIONS4 => MSAA 64KB %u, shared resource tier %u, native16 %u.\n",
+                        data->MSAA64KBAlignedTextureSupported, data->SharedResourceCompatibilityTier,
+                        data->Native16BitShaderOpsSupported);
             return S_OK;
         }
 
@@ -3907,6 +4052,9 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_CheckFeatureSupport(d3d12_device_i
             TRACE("SRV-only Tiled Resources Tier 3 %#x.\n", data->SRVOnlyTiledResourceTier3);
             TRACE("Render pass tier %u.\n", data->RenderPassesTier);
             TRACE("Raytracing tier %u.\n", data->RaytracingTier);
+            if (vkd3d_should_log_feature_queries())
+                INFO("D3D12_OPTIONS5 => srv-only tiled tier3 %u, render pass tier %u, raytracing tier %u.\n",
+                        data->SRVOnlyTiledResourceTier3, data->RenderPassesTier, data->RaytracingTier);
             return S_OK;
         }
 
@@ -3927,6 +4075,13 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_CheckFeatureSupport(d3d12_device_i
             TRACE("Variable shading rate tier %u.\n", data->VariableShadingRateTier);
             TRACE("Shading rate image tile size %u.\n", data->ShadingRateImageTileSize);
             TRACE("Background processing %#x.\n", data->BackgroundProcessingSupported);
+            if (vkd3d_should_log_feature_queries())
+                INFO("D3D12_OPTIONS6 => additional shading rates %u, per-primitive with viewport %u, "
+                        "VRS tier %u, tile size %u, background processing %u.\n",
+                        data->AdditionalShadingRatesSupported,
+                        data->PerPrimitiveShadingRateSupportedWithViewportIndexing,
+                        data->VariableShadingRateTier, data->ShadingRateImageTileSize,
+                        data->BackgroundProcessingSupported);
             return S_OK;
         }
 
@@ -3944,6 +4099,9 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_CheckFeatureSupport(d3d12_device_i
 
             TRACE("Mesh shading tier %#x.\n", data->MeshShaderTier);
             TRACE("Sampler feedback tier %#x.\n", data->SamplerFeedbackTier);
+            if (vkd3d_should_log_feature_queries())
+                INFO("D3D12_OPTIONS7 => mesh shader tier %u, sampler feedback tier %u.\n",
+                        data->MeshShaderTier, data->SamplerFeedbackTier);
             return S_OK;
         }
 
