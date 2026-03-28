@@ -171,6 +171,14 @@ struct dxgi_vk_swap_chain
     } wait_thread;
 };
 
+static bool vkd3d_should_force_swapchain_magenta(void)
+{
+    char env[64];
+
+    return (vkd3d_get_env_var("VKD3D_FORCE_SWAPCHAIN_MAGENTA", env, sizeof(env))
+            && strcmp(env, "0") && strcmp(env, "false") && strcmp(env, "FALSE"));
+}
+
 static void dxgi_vk_swap_chain_drain_queue(struct dxgi_vk_swap_chain *chain)
 {
     const struct vkd3d_vk_device_procs *vk_procs = &chain->queue->device->vk_procs;
@@ -1471,15 +1479,23 @@ static void dxgi_vk_swap_chain_record_render_pass(struct dxgi_vk_swap_chain *cha
     VkRenderingInfo rendering_info;
     VkDependencyInfo dep_info;
     VkViewport viewport;
+    bool force_swapchain_magenta;
     bool blank_present;
 
     /* If application intends to present before we have rendered to it,
      * it is valid, but we need to ignore the blit, just clear backbuffer. */
     resource = chain->user.backbuffers[chain->request.user_index];
     blank_present = vkd3d_atomic_uint32_load_explicit(&resource->initial_layout_transition, vkd3d_memory_order_relaxed) != 0;
+    force_swapchain_magenta = vkd3d_should_force_swapchain_magenta();
 
     if (blank_present)
         WARN("Application is presenting user index %u, but it has never been rendered to.\n", chain->request.user_index);
+
+    if (force_swapchain_magenta)
+    {
+        INFO("Forcing swapchain image %u to magenta and skipping blit draw.\n", swapchain_index);
+        blank_present = true;
+    }
 
     memset(&attachment_info, 0, sizeof(attachment_info));
     attachment_info.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR;
@@ -1490,6 +1506,14 @@ static void dxgi_vk_swap_chain_record_render_pass(struct dxgi_vk_swap_chain *cha
 
     if (chain->desc.Scaling == DXGI_SCALING_NONE || blank_present)
         attachment_info.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+
+    if (force_swapchain_magenta)
+    {
+        attachment_info.clearValue.color.float32[0] = 1.0f;
+        attachment_info.clearValue.color.float32[1] = 0.0f;
+        attachment_info.clearValue.color.float32[2] = 1.0f;
+        attachment_info.clearValue.color.float32[3] = 1.0f;
+    }
 
     memset(&rendering_info, 0, sizeof(rendering_info));
     rendering_info.sType = VK_STRUCTURE_TYPE_RENDERING_INFO_KHR;
