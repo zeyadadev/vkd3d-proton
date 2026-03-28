@@ -446,6 +446,7 @@ enum vkd3d_application_feature_override
 {
     VKD3D_APPLICATION_FEATURE_OVERRIDE_NONE = 0,
     VKD3D_APPLICATION_FEATURE_OVERRIDE_PROMOTE_DXR_TO_ULTIMATE,
+    VKD3D_APPLICATION_FEATURE_OVERRIDE_FORCE_FEATURE_LEVEL_12_0,
 };
 
 static enum vkd3d_application_feature_override vkd3d_application_feature_override;
@@ -524,6 +525,10 @@ static const struct vkd3d_instance_application_meta application_override[] = {
     { VKD3D_STRING_COMPARE_EXACT, "Dead Space.exe", VKD3D_CONFIG_FLAG_FORCE_DEDICATED_IMAGE_ALLOCATION, 0 },
     /* Witcher 3 (2023) (292030) */
     { VKD3D_STRING_COMPARE_EXACT, "witcher3.exe", VKD3D_CONFIG_FLAG_SIMULTANEOUS_UAV_SUPPRESS_COMPRESSION, 0 },
+    /* Hades II.
+     * Some adapter selection paths appear to reject the device unless it exposes at least FL 12_0 style caps.
+     * Keep this narrow and only promote the minimum caps needed to advertise 12_0. */
+    { VKD3D_STRING_COMPARE_EXACT, "hades2.exe", 0, 0, VKD3D_APPLICATION_FEATURE_OVERRIDE_FORCE_FEATURE_LEVEL_12_0 },
     { VKD3D_STRING_COMPARE_NEVER, NULL, 0, 0 }
 };
 
@@ -7097,6 +7102,22 @@ static void d3d12_device_caps_override_application(struct d3d12_device *device)
             }
             break;
 
+        case VKD3D_APPLICATION_FEATURE_OVERRIDE_FORCE_FEATURE_LEVEL_12_0:
+            if (device->d3d12_caps.max_feature_level < D3D_FEATURE_LEVEL_12_0)
+            {
+                device->d3d12_caps.options.OutputMergerLogicOp = TRUE;
+                device->d3d12_caps.options.TiledResourcesTier =
+                        max(device->d3d12_caps.options.TiledResourcesTier, D3D12_TILED_RESOURCES_TIER_2);
+                device->d3d12_caps.options.ResourceBindingTier =
+                        max(device->d3d12_caps.options.ResourceBindingTier, D3D12_RESOURCE_BINDING_TIER_2);
+                device->d3d12_caps.options.TypedUAVLoadAdditionalFormats = TRUE;
+                device->d3d12_caps.max_shader_model =
+                        max(device->d3d12_caps.max_shader_model, D3D_SHADER_MODEL_6_0);
+                device->d3d12_caps.max_feature_level = D3D_FEATURE_LEVEL_12_0;
+                INFO("Promoting Hades II adapter caps to FL 12_0 / SM 6.0 for compatibility.\n");
+            }
+            break;
+
         default:
             break;
     }
@@ -7194,6 +7215,11 @@ static void d3d12_device_caps_init(struct d3d12_device *device)
     d3d12_device_caps_shader_model_override(device);
     d3d12_device_caps_override(device);
     d3d12_device_caps_override_application(device);
+
+    INFO("D3D12 caps: FL %#x, SM %#x, binding tier %u, tiled tier %u, typed UAV loads %u, ROVs %u.\n",
+            device->d3d12_caps.max_feature_level, device->d3d12_caps.max_shader_model,
+            device->d3d12_caps.options.ResourceBindingTier, device->d3d12_caps.options.TiledResourcesTier,
+            device->d3d12_caps.options.TypedUAVLoadAdditionalFormats, device->d3d12_caps.options.ROVsSupported);
 }
 
 static void vkd3d_init_shader_extensions(struct d3d12_device *device)
