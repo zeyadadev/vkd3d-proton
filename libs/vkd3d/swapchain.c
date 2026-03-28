@@ -124,6 +124,7 @@ struct dxgi_vk_swap_chain
         uint32_t backbuffer_height;
         uint32_t backbuffer_count;
         VkFormat backbuffer_format;
+        bool transfer_dst_enabled;
         bool acquire_fence_pending;
 
         struct vkd3d_swapchain_info pipeline;
@@ -184,6 +185,14 @@ static bool vkd3d_should_force_swapchain_source_barrier(void)
     char env[64];
 
     return (vkd3d_get_env_var("VKD3D_FORCE_SWAPCHAIN_SOURCE_BARRIER", env, sizeof(env))
+            && strcmp(env, "0") && strcmp(env, "false") && strcmp(env, "FALSE"));
+}
+
+static bool vkd3d_should_force_swapchain_copy(void)
+{
+    char env[64];
+
+    return (vkd3d_get_env_var("VKD3D_FORCE_SWAPCHAIN_COPY", env, sizeof(env))
             && strcmp(env, "0") && strcmp(env, "false") && strcmp(env, "FALSE"));
 }
 
@@ -1304,6 +1313,7 @@ static void dxgi_vk_swap_chain_recreate_swapchain_in_present_task(struct dxgi_vk
     VkImageViewCreateInfo view_info;
     VkPresentModeKHR present_mode;
     uint32_t override_image_count;
+    bool force_swapchain_copy;
     bool new_occlusion_state;
     char count_env[16];
     VkResult vr;
@@ -1383,6 +1393,22 @@ static void dxgi_vk_swap_chain_recreate_swapchain_in_present_task(struct dxgi_vk
 
     if (surface_caps.maxImageCount && swapchain_create_info.minImageCount > surface_caps.maxImageCount)
         swapchain_create_info.minImageCount = surface_caps.maxImageCount;
+
+    force_swapchain_copy = vkd3d_should_force_swapchain_copy();
+    chain->present.transfer_dst_enabled = false;
+    if (force_swapchain_copy)
+    {
+        if (surface_caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT)
+        {
+            swapchain_create_info.imageUsage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+            chain->present.transfer_dst_enabled = true;
+            INFO("Enabling TRANSFER_DST usage on swapchain images for debug copy path.\n");
+        }
+        else
+        {
+            WARN("VKD3D_FORCE_SWAPCHAIN_COPY requested, but surface does not support TRANSFER_DST swapchain images.\n");
+        }
+    }
 
     swapchain_create_info.imageExtent = surface_caps.currentExtent;
     swapchain_create_info.imageExtent.width = max(swapchain_create_info.imageExtent.width, surface_caps.minImageExtent.width);
@@ -1507,6 +1533,138 @@ static void dxgi_vk_swap_chain_record_render_pass(struct dxgi_vk_swap_chain *cha
     {
         INFO("Forcing swapchain image %u to magenta and skipping blit draw.\n", swapchain_index);
         blank_present = true;
+    }
+
+    if (!blank_present && vkd3d_should_force_swapchain_copy() && chain->present.transfer_dst_enabled)
+    {
+        VkImageMemoryBarrier2 transfer_barriers[2];
+        VkDependencyInfo transfer_dep_info;
+        VkImageLayout source_copy_layout;
+        VkImageLayout source_sample_layout;
+        uint32_t src_width, src_height;
+        bool use_copy;
+
+        src_width = (uint32_t)resource->desc.Width;
+        src_height = resource->desc.Height;
+        source_sample_layout = d3d12_resource_pick_layout(resource, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        source_copy_layout = d3d12_resource_pick_layout(resource, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        use_copy = resource->format->vk_format == chain->present.backbuffer_format &&
+                src_width == chain->present.backbuffer_width &&
+                src_height == chain->present.backbuffer_height;
+
+        INFO("Forcing direct swapchain %s for user image %u (src %ux%u fmt %#x -> dst %ux%u fmt %#x).\n",
+                use_copy ? "copy" : "blit", chain->request.user_index,
+                src_width, src_height, resource->format->vk_format,
+                chain->present.backbuffer_width, chain->present.backbuffer_height,
+                chain->present.backbuffer_format);
+
+        memset(transfer_barriers, 0, sizeof(transfer_barriers));
+
+        transfer_barriers[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        transfer_barriers[0].dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+        transfer_barriers[0].dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        transfer_barriers[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        transfer_barriers[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        transfer_barriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        transfer_barriers[0].image = chain->present.vk_backbuffer_images[swapchain_index];
+        transfer_barriers[0].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        transfer_barriers[0].subresourceRange.levelCount = 1;
+        transfer_barriers[0].subresourceRange.layerCount = 1;
+
+        transfer_barriers[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        transfer_barriers[1].srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        transfer_barriers[1].srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+        transfer_barriers[1].dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+        transfer_barriers[1].dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+        transfer_barriers[1].oldLayout = source_sample_layout;
+        transfer_barriers[1].newLayout = source_copy_layout;
+        transfer_barriers[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        transfer_barriers[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        transfer_barriers[1].image = resource->res.vk_image;
+        transfer_barriers[1].subresourceRange.aspectMask = resource->format->vk_aspect_mask;
+        transfer_barriers[1].subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS;
+        transfer_barriers[1].subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
+
+        memset(&transfer_dep_info, 0, sizeof(transfer_dep_info));
+        transfer_dep_info.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        transfer_dep_info.imageMemoryBarrierCount = 2;
+        transfer_dep_info.pImageMemoryBarriers = transfer_barriers;
+
+        VK_CALL(vkCmdPipelineBarrier2(vk_cmd, &transfer_dep_info));
+
+        if (use_copy)
+        {
+            VkImageCopy2 image_copy;
+            VkCopyImageInfo2 copy_info;
+
+            memset(&image_copy, 0, sizeof(image_copy));
+            image_copy.sType = VK_STRUCTURE_TYPE_IMAGE_COPY_2;
+            image_copy.srcSubresource.aspectMask = resource->format->vk_aspect_mask;
+            image_copy.srcSubresource.layerCount = 1;
+            image_copy.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            image_copy.dstSubresource.layerCount = 1;
+            image_copy.extent.width = src_width;
+            image_copy.extent.height = src_height;
+            image_copy.extent.depth = 1;
+
+            memset(&copy_info, 0, sizeof(copy_info));
+            copy_info.sType = VK_STRUCTURE_TYPE_COPY_IMAGE_INFO_2;
+            copy_info.srcImage = resource->res.vk_image;
+            copy_info.srcImageLayout = source_copy_layout;
+            copy_info.dstImage = chain->present.vk_backbuffer_images[swapchain_index];
+            copy_info.dstImageLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            copy_info.regionCount = 1;
+            copy_info.pRegions = &image_copy;
+
+            VK_CALL(vkCmdCopyImage2(vk_cmd, &copy_info));
+        }
+        else
+        {
+            VkImageBlit2 image_blit;
+            VkBlitImageInfo2 blit_info;
+
+            memset(&image_blit, 0, sizeof(image_blit));
+            image_blit.sType = VK_STRUCTURE_TYPE_IMAGE_BLIT_2;
+            image_blit.srcSubresource.aspectMask = resource->format->vk_aspect_mask;
+            image_blit.srcSubresource.layerCount = 1;
+            image_blit.srcOffsets[1].x = src_width;
+            image_blit.srcOffsets[1].y = src_height;
+            image_blit.srcOffsets[1].z = 1;
+            image_blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            image_blit.dstSubresource.layerCount = 1;
+            image_blit.dstOffsets[1].x = chain->present.backbuffer_width;
+            image_blit.dstOffsets[1].y = chain->present.backbuffer_height;
+            image_blit.dstOffsets[1].z = 1;
+
+            memset(&blit_info, 0, sizeof(blit_info));
+            blit_info.sType = VK_STRUCTURE_TYPE_BLIT_IMAGE_INFO_2;
+            blit_info.srcImage = resource->res.vk_image;
+            blit_info.srcImageLayout = source_copy_layout;
+            blit_info.dstImage = chain->present.vk_backbuffer_images[swapchain_index];
+            blit_info.dstImageLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            blit_info.regionCount = 1;
+            blit_info.pRegions = &image_blit;
+            blit_info.filter = chain->desc.Scaling == DXGI_SCALING_NONE ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
+
+            VK_CALL(vkCmdBlitImage2(vk_cmd, &blit_info));
+        }
+
+        transfer_barriers[0].srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+        transfer_barriers[0].srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        transfer_barriers[0].dstStageMask = VK_PIPELINE_STAGE_2_NONE;
+        transfer_barriers[0].dstAccessMask = VK_ACCESS_2_NONE;
+        transfer_barriers[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        transfer_barriers[0].newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+        transfer_barriers[1].srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+        transfer_barriers[1].srcAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+        transfer_barriers[1].dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        transfer_barriers[1].dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+        transfer_barriers[1].oldLayout = source_copy_layout;
+        transfer_barriers[1].newLayout = source_sample_layout;
+
+        VK_CALL(vkCmdPipelineBarrier2(vk_cmd, &transfer_dep_info));
+        return;
     }
 
     memset(&attachment_info, 0, sizeof(attachment_info));
