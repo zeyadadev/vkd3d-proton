@@ -76,6 +76,9 @@ static void d3d12_command_list_decay_optimal_dsv_resource(struct d3d12_command_l
 static void d3d12_command_list_end_transfer_batch(struct d3d12_command_list *list);
 static void d3d12_command_list_end_wbi_batch(struct d3d12_command_list *list);
 static inline void d3d12_command_list_ensure_transfer_batch(struct d3d12_command_list *list, enum vkd3d_batch_type type);
+static void d3d12_command_list_clear_attachment(struct d3d12_command_list *list, struct d3d12_resource *resource,
+        struct vkd3d_view *view, VkImageAspectFlags clear_aspects, const VkClearValue *clear_value, UINT rect_count,
+        const D3D12_RECT *rects);
 
 static void d3d12_command_list_flush_query_resolves(struct d3d12_command_list *list);
 
@@ -128,6 +131,44 @@ static bool vkd3d_should_force_debug_clear_for_rtv(const struct d3d12_command_li
         return false;
 
     return dxgi_format == DXGI_FORMAT_B8G8R8A8_UNORM || dxgi_format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+}
+
+static bool vkd3d_should_force_backbuffer_magenta_draw(void)
+{
+    char env[64];
+
+    return (vkd3d_get_env_var("VKD3D_FORCE_BACKBUFFER_MAGENTA_DRAW", env, sizeof(env))
+            && strcmp(env, "0") && strcmp(env, "false") && strcmp(env, "FALSE"));
+}
+
+static bool vkd3d_force_backbuffer_magenta_draw(struct d3d12_command_list *list, const char *draw_name)
+{
+    static const float debug_color[4] = {1.0f, 0.0f, 1.0f, 1.0f};
+    const struct d3d12_rtv_desc *rtv_desc = &list->rtvs[0];
+    VkClearValue clear_value;
+
+    if (!vkd3d_should_force_backbuffer_magenta_draw())
+        return false;
+
+    if (!rtv_desc->resource || !rtv_desc->view)
+        return false;
+
+    if (!rtv_desc->resource->is_dxgi_swapchain_buffer)
+        return false;
+
+    clear_value.color.float32[0] = debug_color[0];
+    clear_value.color.float32[1] = debug_color[1];
+    clear_value.color.float32[2] = debug_color[2];
+    clear_value.color.float32[3] = debug_color[3];
+
+    INFO("Forcing magenta clear in place of %s for DXGI backbuffer cookie %016"PRIx64", format %s, %ux%u.\n",
+            draw_name, rtv_desc->resource->res.cookie,
+            debug_dxgi_format(rtv_desc->format->dxgi_format),
+            rtv_desc->width, rtv_desc->height);
+
+    d3d12_command_list_clear_attachment(list, rtv_desc->resource, rtv_desc->view,
+            VK_IMAGE_ASPECT_COLOR_BIT, &clear_value, 0, NULL);
+    return true;
 }
 
 static void vkd3d_log_runtime_rt_bindings(const struct d3d12_command_list *list, unsigned int render_target_descriptor_count)
@@ -7071,6 +7112,9 @@ static void STDMETHODCALLTYPE d3d12_command_list_DrawInstanced(d3d12_command_lis
         vkd3d_log_runtime_graphics_state(list);
     }
 
+    if (vkd3d_force_backbuffer_magenta_draw(list, "DrawInstanced"))
+        return;
+
     if (!list->predicate_va)
         VK_CALL(vkCmdDraw(list->vk_command_buffer, vertex_count_per_instance,
                 instance_count, start_vertex_location, start_instance_location));
@@ -7153,6 +7197,9 @@ static void STDMETHODCALLTYPE d3d12_command_list_DrawIndexedInstanced(d3d12_comm
                 base_vertex_location, start_instance_location, list->fb_width, list->fb_height);
         vkd3d_log_runtime_graphics_state(list);
     }
+
+    if (vkd3d_force_backbuffer_magenta_draw(list, "DrawIndexedInstanced"))
+        return;
 
     d3d12_command_list_check_index_buffer_strip_cut_value(list);
 

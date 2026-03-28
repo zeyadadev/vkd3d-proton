@@ -970,6 +970,7 @@ struct d3d12_resource
     const struct vkd3d_format *format;
 
     VkImageView vrs_view;
+    bool is_dxgi_swapchain_buffer;
 
     struct vkd3d_private_store private_store;
 };

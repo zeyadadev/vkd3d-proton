@@ -530,6 +530,8 @@ static HRESULT dxgi_vk_swap_chain_reallocate_user_buffers(struct dxgi_vk_swap_ch
         if (FAILED(hr = dxgi_vk_swap_chain_allocate_user_buffer(chain, &chain->desc, &chain->user.backbuffers[i])))
             goto err;
 
+        chain->user.backbuffers[i]->is_dxgi_swapchain_buffer = true;
+
         /* We need to hold a private reference to the resource, not a public one. */
         vkd3d_resource_incref((ID3D12Resource *)&chain->user.backbuffers[i]->ID3D12Resource_iface);
         ID3D12Resource2_Release(&chain->user.backbuffers[i]->ID3D12Resource_iface);
