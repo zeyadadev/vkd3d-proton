@@ -835,6 +835,135 @@ static const char *vkd3d_runtime_stage_name(VkShaderStageFlagBits stage)
     }
 }
 
+static const char *vkd3d_runtime_debug_shader_descriptor_type(enum vkd3d_shader_descriptor_type type)
+{
+    switch (type)
+    {
+        case VKD3D_SHADER_DESCRIPTOR_TYPE_CBV:
+            return "CBV";
+        case VKD3D_SHADER_DESCRIPTOR_TYPE_SRV:
+            return "SRV";
+        case VKD3D_SHADER_DESCRIPTOR_TYPE_UAV:
+            return "UAV";
+        case VKD3D_SHADER_DESCRIPTOR_TYPE_SAMPLER:
+            return "SAMPLER";
+        default:
+            return "UNKNOWN";
+    }
+}
+
+static const char *vkd3d_runtime_debug_view_type(enum vkd3d_view_type type)
+{
+    switch (type)
+    {
+        case VKD3D_VIEW_TYPE_BUFFER:
+            return "BUFFER";
+        case VKD3D_VIEW_TYPE_IMAGE:
+            return "IMAGE";
+        case VKD3D_VIEW_TYPE_SAMPLER:
+            return "SAMPLER";
+        case VKD3D_VIEW_TYPE_ACCELERATION_STRUCTURE:
+            return "AS";
+        default:
+            return "UNKNOWN";
+    }
+}
+
+static void vkd3d_log_runtime_descriptor_table_contents(const struct d3d12_command_list *list,
+        const struct vkd3d_pipeline_bindings *bindings,
+        unsigned int root_parameter_index,
+        const struct vkd3d_shader_descriptor_table *table)
+{
+    uint32_t table_offset = bindings->descriptor_tables[root_parameter_index];
+    unsigned int logged_entries = 0;
+    unsigned int i;
+
+    for (i = 0; i < table->binding_count; ++i)
+    {
+        const struct vkd3d_shader_resource_binding *binding = &table->first_binding[i];
+        unsigned int j, log_count;
+
+        INFO("    Binding[%u]: %s space %u reg %u count %u table offset %u flags %#x set %u binding %u.\n",
+                i, vkd3d_runtime_debug_shader_descriptor_type(binding->type),
+                binding->register_space, binding->register_index, binding->register_count,
+                binding->descriptor_offset, binding->flags,
+                binding->binding.set, binding->binding.binding);
+
+        if (binding->type == VKD3D_SHADER_DESCRIPTOR_TYPE_SAMPLER)
+        {
+            INFO("      Sampler table contents are not introspected in this path.\n");
+            continue;
+        }
+
+        if (!list->cbv_srv_uav_descriptors_types || !list->cbv_srv_uav_descriptors_view)
+        {
+            INFO("      Descriptor heap metadata is unavailable for CBV/SRV/UAV tables.\n");
+            continue;
+        }
+
+        log_count = min(binding->register_count, 2u);
+        if (logged_entries + log_count > 4)
+            log_count = 4 - logged_entries;
+
+        for (j = 0; j < log_count; ++j)
+        {
+            const struct vkd3d_descriptor_metadata_types *types;
+            const struct vkd3d_descriptor_metadata_view *view;
+            uint32_t descriptor_index;
+
+            descriptor_index = table_offset + binding->descriptor_offset + j;
+            types = &list->cbv_srv_uav_descriptors_types[descriptor_index];
+            view = &list->cbv_srv_uav_descriptors_view[descriptor_index];
+
+            if (types->flags & VKD3D_DESCRIPTOR_FLAG_IMAGE_VIEW)
+            {
+                const struct vkd3d_view *vkd3d_view = view->info.view;
+
+                INFO("      Desc[%u]: heap type %s flags %#x image %p view type %s cookie %016"PRIx64" format %s.\n",
+                        descriptor_index,
+                        vkd3d_runtime_debug_vk_descriptor_type(types->current_null_type),
+                        types->flags,
+                        vkd3d_view ? (void *)(uintptr_t)vkd3d_view->vk_image_view : NULL,
+                        vkd3d_view ? vkd3d_runtime_debug_view_type(vkd3d_view->type) : "NULL",
+                        vkd3d_view ? vkd3d_view->cookie : 0,
+                        (vkd3d_view && vkd3d_view->format) ?
+                                debug_dxgi_format(vkd3d_view->format->dxgi_format) : "UNKNOWN");
+            }
+            else if (types->flags & (VKD3D_DESCRIPTOR_FLAG_BUFFER_VA_RANGE | VKD3D_DESCRIPTOR_FLAG_BUFFER_OFFSET))
+            {
+                INFO("      Desc[%u]: heap type %s flags %#x buffer VA %#"PRIx64" range %u format %s.\n",
+                        descriptor_index,
+                        vkd3d_runtime_debug_vk_descriptor_type(types->current_null_type),
+                        types->flags,
+                        view->info.buffer.va,
+                        view->info.buffer.range,
+                        debug_dxgi_format(view->info.buffer.dxgi_format));
+            }
+            else
+            {
+                const struct vkd3d_view *vkd3d_view = view->info.view;
+
+                INFO("      Desc[%u]: heap type %s flags %#x view %p view type %s cookie %016"PRIx64" format %s.\n",
+                        descriptor_index,
+                        vkd3d_runtime_debug_vk_descriptor_type(types->current_null_type),
+                        types->flags,
+                        vkd3d_view ? (void *)(uintptr_t)vkd3d_view->vk_buffer_view : NULL,
+                        vkd3d_view ? vkd3d_runtime_debug_view_type(vkd3d_view->type) : "NULL",
+                        vkd3d_view ? vkd3d_view->cookie : 0,
+                        (vkd3d_view && vkd3d_view->format) ?
+                                debug_dxgi_format(vkd3d_view->format->dxgi_format) : "UNKNOWN");
+            }
+        }
+
+        logged_entries += log_count;
+        if (logged_entries >= 4)
+        {
+            INFO("      Descriptor table dump truncated after %u entries.\n", logged_entries);
+            return;
+        }
+    }
+}
+
 static void vkd3d_log_runtime_graphics_state(const struct d3d12_command_list *list)
 {
     const struct d3d12_pipeline_state *state = list->state;
@@ -899,6 +1028,7 @@ static void vkd3d_log_runtime_graphics_state(const struct d3d12_command_list *li
             INFO("  Descriptor table p%u -> table %u offset %u.\n",
                     root_parameter_index, table->table_index,
                     bindings->descriptor_tables[root_parameter_index]);
+            vkd3d_log_runtime_descriptor_table_contents(list, bindings, root_parameter_index, table);
         }
     }
     else if (root_signature->descriptor_table_count)
