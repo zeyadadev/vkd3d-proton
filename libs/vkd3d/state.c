@@ -3834,12 +3834,56 @@ static uint32_t d3d12_graphics_pipeline_state_init_dynamic_state(struct d3d12_pi
     return dynamic_state_flags;
 }
 
+static bool vkd3d_should_log_pso_io(void)
+{
+    char env[64];
+
+    return ((vkd3d_get_env_var("VKD3D_LOG_PSO_IO", env, sizeof(env))
+            || vkd3d_get_env_var("VKD3D_LOG_FEATURE_QUERIES", env, sizeof(env)))
+            && strcmp(env, "0") && strcmp(env, "false") && strcmp(env, "FALSE"));
+}
+
+static void vkd3d_log_shader_signature(const char *label, const struct vkd3d_shader_signature *sig)
+{
+    unsigned int i;
+
+    if (!vkd3d_should_log_pso_io())
+        return;
+
+    INFO("%s signature has %u element(s).\n", label, sig->element_count);
+    for (i = 0; i < sig->element_count; ++i)
+    {
+        const struct vkd3d_shader_signature_element *e = &sig->elements[i];
+        INFO("%s[%u]: semantic %s%u, stream %u, sysval %#x, register %u, mask %#x, precision %#x.\n",
+                label, i, debugstr_a(e->semantic_name), e->semantic_index, e->stream_index,
+                e->sysval_semantic, e->register_index, e->mask, e->min_precision);
+    }
+}
+
 static HRESULT d3d12_pipeline_state_validate_blend_state(struct d3d12_pipeline_state *state,
         const struct d3d12_device *device,
         const struct d3d12_pipeline_state_desc *desc, const struct vkd3d_shader_signature *sig)
 {
     const struct vkd3d_format *format;
     unsigned int i, j, register_index;
+
+    if (vkd3d_should_log_pso_io())
+    {
+        INFO("Blend validation: %u RT(s), fragment outputs %u, independent blend %u, dual-source %u.\n",
+                desc->rtv_formats.NumRenderTargets, sig->element_count,
+                desc->blend_state.IndependentBlendEnable,
+                is_dual_source_blending(&desc->blend_state.RenderTarget[0]));
+        for (i = 0; i < desc->rtv_formats.NumRenderTargets; ++i)
+        {
+            INFO("RTV[%u]: format %s, desc blend %u, pipeline blend %u, write mask %#x.\n",
+                    i, debug_dxgi_format(desc->rtv_formats.RTFormats[i]),
+                    desc->blend_state.RenderTarget[i].BlendEnable,
+                    state->graphics.blend_attachments[i].blendEnable,
+                    desc->blend_state.RenderTarget[i].RenderTargetWriteMask);
+        }
+        if (!sig->element_count)
+            INFO("Blend validation sees an empty fragment output signature.\n");
+    }
 
     if (is_dual_source_blending(&desc->blend_state.RenderTarget[0]))
     {
@@ -3888,10 +3932,13 @@ static HRESULT d3d12_pipeline_state_validate_blend_state(struct d3d12_pipeline_s
          * in this case. If there is an output, fail pipeline compilation. */
         if (format && (format->type == VKD3D_FORMAT_TYPE_SINT || format->type == VKD3D_FORMAT_TYPE_UINT))
         {
+            bool matched_output = false;
+
             for (j = 0; j < sig->element_count; j++)
             {
                 if (sig->elements[j].register_index == i)
                 {
+                    matched_output = true;
                     ERR("Enabling blending on RT %u with format %s, but using integer format is not supported.\n", i,
                             debug_dxgi_format(desc->rtv_formats.RTFormats[i]));
                     return E_INVALIDARG;
@@ -3899,6 +3946,11 @@ static HRESULT d3d12_pipeline_state_validate_blend_state(struct d3d12_pipeline_s
             }
 
             /* The output does not exist, but we have to pass the pipeline. Just nop out any invalid blend state. */
+            if (vkd3d_should_log_pso_io() && !matched_output)
+            {
+                INFO("RTV[%u] uses integer format %s, but no matching fragment output was found. Disabling blend.\n",
+                        i, debug_dxgi_format(desc->rtv_formats.RTFormats[i]));
+            }
             WARN("Enabling blending on RT %u with format %s, but using integer format is not supported. "
                  "The output is not written, so nop-ing out blending.\n",
                     i, debug_dxgi_format(desc->rtv_formats.RTFormats[i]));
@@ -4310,6 +4362,7 @@ static HRESULT d3d12_pipeline_state_init_graphics_create_info(struct d3d12_pipel
                     goto fail;
                 }
 
+                vkd3d_log_shader_signature("Fragment output", &output_signature);
                 if (FAILED(hr = d3d12_pipeline_state_validate_blend_state(state, device, desc, &output_signature)))
                     goto fail;
                 break;
