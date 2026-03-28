@@ -79,6 +79,8 @@ static inline void d3d12_command_list_ensure_transfer_batch(struct d3d12_command
 static void d3d12_command_list_clear_attachment(struct d3d12_command_list *list, struct d3d12_resource *resource,
         struct vkd3d_view *view, VkImageAspectFlags clear_aspects, const VkClearValue *clear_value, UINT rect_count,
         const D3D12_RECT *rects);
+static void d3d12_command_list_invalidate_root_parameters(struct d3d12_command_list *list,
+        struct vkd3d_pipeline_bindings *bindings, bool invalidate_descriptor_heaps);
 
 static void d3d12_command_list_flush_query_resolves(struct d3d12_command_list *list);
 
@@ -138,6 +140,14 @@ static bool vkd3d_should_force_backbuffer_magenta_draw(void)
     char env[64];
 
     return (vkd3d_get_env_var("VKD3D_FORCE_BACKBUFFER_MAGENTA_DRAW", env, sizeof(env))
+            && strcmp(env, "0") && strcmp(env, "false") && strcmp(env, "FALSE"));
+}
+
+static bool vkd3d_should_force_backbuffer_meta_blit(void)
+{
+    char env[64];
+
+    return (vkd3d_get_env_var("VKD3D_FORCE_BACKBUFFER_META_BLIT", env, sizeof(env))
             && strcmp(env, "0") && strcmp(env, "false") && strcmp(env, "FALSE"));
 }
 
@@ -852,6 +862,62 @@ static const struct vkd3d_shader_root_parameter *root_signature_get_root_descrip
         || p->parameter_type == D3D12_ROOT_PARAMETER_TYPE_SRV
         || p->parameter_type == D3D12_ROOT_PARAMETER_TYPE_UAV);
     return p;
+}
+
+static const struct vkd3d_view *vkd3d_find_unique_active_sampled_image_view(const struct d3d12_command_list *list)
+{
+    const struct vkd3d_pipeline_bindings *bindings = &list->graphics_bindings;
+    const struct d3d12_root_signature *root_signature = bindings->root_signature;
+    const struct vkd3d_view *result = NULL;
+    uint64_t descriptor_table_mask;
+
+    if (!root_signature)
+        return NULL;
+
+    descriptor_table_mask = root_signature->descriptor_table_mask & bindings->descriptor_table_active_mask;
+    while (descriptor_table_mask)
+    {
+        const struct vkd3d_shader_descriptor_table *table;
+        unsigned int root_parameter_index;
+        uint32_t table_offset;
+        unsigned int i;
+
+        root_parameter_index = vkd3d_bitmask_iter64(&descriptor_table_mask);
+        table = root_signature_get_descriptor_table(root_signature, root_parameter_index);
+        table_offset = bindings->descriptor_tables[root_parameter_index];
+
+        for (i = 0; i < table->binding_count; ++i)
+        {
+            const struct vkd3d_shader_resource_binding *binding = &table->first_binding[i];
+            const struct vkd3d_descriptor_metadata_types *types;
+            const struct vkd3d_descriptor_metadata_view *view;
+            uint32_t descriptor_index;
+
+            if (binding->type != VKD3D_SHADER_DESCRIPTOR_TYPE_SRV)
+                continue;
+
+            if (binding->register_count != 1)
+                return NULL;
+
+            descriptor_index = table_offset + binding->descriptor_offset;
+            types = &list->cbv_srv_uav_descriptors_types[descriptor_index];
+            view = &list->cbv_srv_uav_descriptors_view[descriptor_index];
+
+            if (!(types->flags & VKD3D_DESCRIPTOR_FLAG_IMAGE_VIEW))
+                continue;
+            if (types->current_null_type != VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE)
+                continue;
+            if (!view->info.view || view->info.view->type != VKD3D_VIEW_TYPE_IMAGE)
+                return NULL;
+
+            if (result && result != view->info.view)
+                return NULL;
+
+            result = view->info.view;
+        }
+    }
+
+    return result;
 }
 
 static const char *vkd3d_runtime_debug_root_parameter_type(D3D12_ROOT_PARAMETER_TYPE type)
@@ -3214,6 +3280,116 @@ static void d3d12_command_list_invalidate_current_pipeline(struct d3d12_command_
         /* For meta shaders, just pretend we never bound anything since we don't do tracking for these pipeline binds. */
         list->command_buffer_pipeline = VK_NULL_HANDLE;
     }
+}
+
+static bool vkd3d_force_backbuffer_meta_blit(struct d3d12_command_list *list, const char *draw_name)
+{
+    const struct vkd3d_vk_device_procs *vk_procs = &list->device->vk_procs;
+    const struct d3d12_rtv_desc *rtv_desc = &list->rtvs[0];
+    const struct vkd3d_view *source_view;
+    struct vkd3d_swapchain_pipeline_key key;
+    struct vkd3d_swapchain_info pipeline_info;
+    VkDescriptorImageInfo image_info;
+    VkWriteDescriptorSet write_info;
+    VkViewport viewport;
+    HRESULT hr;
+    VkRect2D scissor;
+    unsigned int i;
+
+    if (!vkd3d_should_force_backbuffer_meta_blit())
+        return false;
+
+    if (list->predicate_va)
+        return false;
+
+    if (!rtv_desc->resource || !rtv_desc->view)
+        return false;
+
+    if (!rtv_desc->resource->is_dxgi_swapchain_buffer)
+        return false;
+
+    if (list->dsv.resource || list->fb_layer_count != 1)
+        return false;
+
+    if (list->dynamic_state.vk_primitive_topology != VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
+        return false;
+
+    for (i = 1; i < D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i)
+    {
+        if (list->rtvs[i].resource)
+            return false;
+    }
+
+    source_view = vkd3d_find_unique_active_sampled_image_view(list);
+    if (!source_view)
+        return false;
+
+    if (source_view == rtv_desc->view)
+        return false;
+
+    if (source_view->info.texture.vk_view_type != VK_IMAGE_VIEW_TYPE_2D ||
+            source_view->info.texture.layer_count != 1)
+        return false;
+
+    key.bind_point = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    key.filter = VK_FILTER_NEAREST;
+    key.format = rtv_desc->view->format->vk_format;
+
+    if (FAILED(hr = vkd3d_meta_get_swapchain_pipeline(&list->device->meta_ops, &key, &pipeline_info)))
+    {
+        WARN("Failed to get backbuffer meta blit pipeline, hr %#x.\n", hr);
+        return false;
+    }
+
+    if (list->dynamic_state.viewport_count == 1)
+    {
+        viewport = list->dynamic_state.viewports[0];
+        scissor = list->dynamic_state.scissors[0];
+    }
+    else
+    {
+        viewport.x = 0.0f;
+        viewport.y = 0.0f;
+        viewport.width = rtv_desc->width;
+        viewport.height = rtv_desc->height;
+        viewport.minDepth = 0.0f;
+        viewport.maxDepth = 1.0f;
+        scissor.offset.x = 0;
+        scissor.offset.y = 0;
+        scissor.extent.width = rtv_desc->width;
+        scissor.extent.height = rtv_desc->height;
+    }
+
+    INFO("Replacing %s with meta backbuffer blit for DXGI backbuffer cookie %016"PRIx64" using source view cookie %016"PRIx64", format %s, %ux%u.\n",
+            draw_name, rtv_desc->resource->res.cookie, source_view->cookie,
+            debug_dxgi_format(rtv_desc->format->dxgi_format), rtv_desc->width, rtv_desc->height);
+
+    VK_CALL(vkCmdBindPipeline(list->vk_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_info.vk_pipeline));
+    VK_CALL(vkCmdSetViewport(list->vk_command_buffer, 0, 1, &viewport));
+    VK_CALL(vkCmdSetScissor(list->vk_command_buffer, 0, 1, &scissor));
+
+    image_info.sampler = VK_NULL_HANDLE;
+    image_info.imageView = source_view->vk_image_view;
+    image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    write_info.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write_info.pNext = NULL;
+    write_info.dstSet = VK_NULL_HANDLE;
+    write_info.dstBinding = 0;
+    write_info.dstArrayElement = 0;
+    write_info.descriptorCount = 1;
+    write_info.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write_info.pImageInfo = &image_info;
+    write_info.pBufferInfo = NULL;
+    write_info.pTexelBufferView = NULL;
+
+    VK_CALL(vkCmdPushDescriptorSetKHR(list->vk_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+            pipeline_info.vk_pipeline_layout, 0, 1, &write_info));
+    VK_CALL(vkCmdDraw(list->vk_command_buffer, 3, 1, 0, 0));
+
+    d3d12_command_list_invalidate_current_pipeline(list, true);
+    d3d12_command_list_invalidate_root_parameters(list, &list->graphics_bindings, true);
+    return true;
 }
 
 static D3D12_RECT d3d12_get_image_rect(struct d3d12_resource *resource, unsigned int mip_level)
@@ -7115,6 +7291,11 @@ static void STDMETHODCALLTYPE d3d12_command_list_DrawInstanced(d3d12_command_lis
     if (vkd3d_force_backbuffer_magenta_draw(list, "DrawInstanced"))
         return;
 
+    if (vertex_count_per_instance == 3 && instance_count == 1 &&
+            start_vertex_location == 0 && start_instance_location == 0 &&
+            vkd3d_force_backbuffer_meta_blit(list, "DrawInstanced"))
+        return;
+
     if (!list->predicate_va)
         VK_CALL(vkCmdDraw(list->vk_command_buffer, vertex_count_per_instance,
                 instance_count, start_vertex_location, start_instance_location));
@@ -7199,6 +7380,10 @@ static void STDMETHODCALLTYPE d3d12_command_list_DrawIndexedInstanced(d3d12_comm
     }
 
     if (vkd3d_force_backbuffer_magenta_draw(list, "DrawIndexedInstanced"))
+        return;
+
+    if (index_count_per_instance == 6 && instance_count == 1 &&
+            vkd3d_force_backbuffer_meta_blit(list, "DrawIndexedInstanced"))
         return;
 
     d3d12_command_list_check_index_buffer_strip_cut_value(list);
