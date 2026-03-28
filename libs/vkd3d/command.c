@@ -84,6 +84,7 @@ static bool vkd3d_should_log_runtime_commands(void)
     char env[64];
 
     return ((vkd3d_get_env_var("VKD3D_LOG_RUNTIME_COMMANDS", env, sizeof(env))
+            || vkd3d_get_env_var("VKD3D_LOG_BACKBUFFER_FLOW", env, sizeof(env))
             || vkd3d_get_env_var("VKD3D_LOG_FEATURE_QUERIES", env, sizeof(env)))
             && strcmp(env, "0") && strcmp(env, "false") && strcmp(env, "FALSE"));
 }
@@ -145,14 +146,33 @@ static void vkd3d_log_runtime_rt_bindings(const struct d3d12_command_list *list,
     {
         if (list->rtvs[i].resource)
         {
-            INFO("  RTV[%u]: format %s, %ux%u layers %u.\n",
-                    i, debug_dxgi_format(list->rtvs[i].format->dxgi_format),
+            INFO("  RTV[%u]: cookie %016"PRIx64", image %p, view %p, view cookie %016"PRIx64", format %s, %ux%u layers %u.\n",
+                    i, list->rtvs[i].resource->res.cookie,
+                    list->rtvs[i].resource->res.vk_image,
+                    list->rtvs[i].view ? list->rtvs[i].view->vk_image_view : VK_NULL_HANDLE,
+                    list->rtvs[i].view ? list->rtvs[i].view->cookie : 0,
+                    debug_dxgi_format(list->rtvs[i].format->dxgi_format),
                     list->rtvs[i].width, list->rtvs[i].height, list->rtvs[i].layer_count);
         }
         else
         {
             INFO("  RTV[%u]: NULL.\n", i);
         }
+    }
+
+    if (list->dsv.resource)
+    {
+        INFO("  DSV: cookie %016"PRIx64", image %p, view %p, view cookie %016"PRIx64", format %s, %ux%u layers %u.\n",
+                list->dsv.resource->res.cookie,
+                list->dsv.resource->res.vk_image,
+                list->dsv.view ? list->dsv.view->vk_image_view : VK_NULL_HANDLE,
+                list->dsv.view ? list->dsv.view->cookie : 0,
+                debug_dxgi_format(list->dsv.format->dxgi_format),
+                list->dsv.width, list->dsv.height, list->dsv.layer_count);
+    }
+    else
+    {
+        INFO("  DSV: NULL.\n");
     }
 }
 
@@ -7999,6 +8019,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_CopyTextureRegion(d3d12_command
         const D3D12_TEXTURE_COPY_LOCATION *src, const D3D12_BOX *src_box)
 {
     struct d3d12_command_list *list = impl_from_ID3D12GraphicsCommandList(iface);
+    struct d3d12_resource *dst_resource;
+    struct d3d12_resource *src_resource;
     struct vkd3d_image_copy_info copy_info;
     bool alias;
     size_t i;
@@ -8015,10 +8037,17 @@ static void STDMETHODCALLTYPE d3d12_command_list_CopyTextureRegion(d3d12_command
     if (!d3d12_command_list_init_copy_texture_region(list, dst, dst_x, dst_y, dst_z, src, src_box, &copy_info))
         return;
 
+    dst_resource = impl_from_ID3D12Resource(dst->pResource);
+    src_resource = impl_from_ID3D12Resource(src->pResource);
+
     if (vkd3d_should_emit_runtime_command_log())
     {
-        INFO("CopyTextureRegion: dst %p (%u, %u, %u) <- src %p box %s, batch type %u.\n",
-                dst->pResource, dst_x, dst_y, dst_z, src->pResource,
+        INFO("CopyTextureRegion: dst %p cookie %016"PRIx64" type %u subresource %u (%u, %u, %u) <- src %p cookie %016"PRIx64" type %u subresource %u box %s, batch type %u.\n",
+                dst->pResource, dst_resource ? dst_resource->res.cookie : 0,
+                dst->Type, dst->Type == D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX ? dst->u.SubresourceIndex : 0,
+                dst_x, dst_y, dst_z,
+                src->pResource, src_resource ? src_resource->res.cookie : 0,
+                src->Type, src->Type == D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX ? src->u.SubresourceIndex : 0,
                 src_box ? debug_d3d12_box(src_box) : "(null)", copy_info.batch_type);
     }
 
@@ -8100,10 +8129,12 @@ static void STDMETHODCALLTYPE d3d12_command_list_CopyResource(d3d12_command_list
 
     if (vkd3d_should_emit_runtime_command_log())
     {
-        INFO("CopyResource: dst %p (%s) <- src %p (%s).\n",
+        INFO("CopyResource: dst %p cookie %016"PRIx64" (%s) <- src %p cookie %016"PRIx64" (%s).\n",
                 dst_resource,
+                dst_resource->res.cookie,
                 dst_resource->format ? debug_dxgi_format(dst_resource->format->dxgi_format) : "UNKNOWN",
                 src_resource,
+                src_resource->res.cookie,
                 src_resource->format ? debug_dxgi_format(src_resource->format->dxgi_format) : "UNKNOWN");
     }
 
@@ -10357,7 +10388,9 @@ static void STDMETHODCALLTYPE d3d12_command_list_ClearDepthStencilView(d3d12_com
 
     if (vkd3d_should_emit_runtime_command_log())
     {
-        INFO("ClearDepthStencilView: format %s, aspects %#x, depth %.8e, stencil %#x, rects %u.\n",
+        INFO("ClearDepthStencilView: cookie %016"PRIx64", view cookie %016"PRIx64", format %s, aspects %#x, depth %.8e, stencil %#x, rects %u.\n",
+                dsv_desc->resource ? dsv_desc->resource->res.cookie : 0,
+                dsv_desc->view ? dsv_desc->view->cookie : 0,
                 debug_dxgi_format(dsv_desc->format->dxgi_format), clear_aspects, depth, stencil, rect_count);
     }
 
@@ -10411,7 +10444,9 @@ static void STDMETHODCALLTYPE d3d12_command_list_ClearRenderTargetView(d3d12_com
 
     if (vkd3d_should_emit_runtime_command_log())
     {
-        INFO("ClearRenderTargetView: format %s, color [%g, %g, %g, %g], rects %u.\n",
+        INFO("ClearRenderTargetView: cookie %016"PRIx64", view cookie %016"PRIx64", format %s, color [%g, %g, %g, %g], rects %u.\n",
+                rtv_desc->resource ? rtv_desc->resource->res.cookie : 0,
+                rtv_desc->view ? rtv_desc->view->cookie : 0,
                 debug_dxgi_format(rtv_desc->format->dxgi_format),
                 clear_color[0], clear_color[1], clear_color[2], clear_color[3], rect_count);
     }

@@ -204,6 +204,16 @@ static bool vkd3d_should_force_swapchain_copy_source_magenta(void)
             && strcmp(env, "0") && strcmp(env, "false") && strcmp(env, "FALSE"));
 }
 
+static bool vkd3d_should_log_backbuffer_flow(void)
+{
+    char env[64];
+
+    return ((vkd3d_get_env_var("VKD3D_LOG_BACKBUFFER_FLOW", env, sizeof(env))
+            || vkd3d_get_env_var("VKD3D_LOG_RUNTIME_COMMANDS", env, sizeof(env))
+            || vkd3d_get_env_var("VKD3D_LOG_FEATURE_QUERIES", env, sizeof(env)))
+            && strcmp(env, "0") && strcmp(env, "false") && strcmp(env, "FALSE"));
+}
+
 static void dxgi_vk_swap_chain_drain_queue(struct dxgi_vk_swap_chain *chain)
 {
     const struct vkd3d_vk_device_procs *vk_procs = &chain->queue->device->vk_procs;
@@ -532,6 +542,15 @@ static HRESULT dxgi_vk_swap_chain_reallocate_user_buffers(struct dxgi_vk_swap_ch
             ERR("Failed to create image view for user image %u.\n", i);
             hr = E_OUTOFMEMORY;
             goto err;
+        }
+
+        if (vkd3d_should_log_backbuffer_flow())
+        {
+            INFO("Swapchain user buffer[%u]: cookie %016"PRIx64", image %p, view %p, format %s, %ux%u.\n",
+                    i, chain->user.backbuffers[i]->res.cookie,
+                    chain->user.backbuffers[i]->res.vk_image, chain->user.vk_image_views[i],
+                    debug_dxgi_format(chain->user.backbuffers[i]->format->dxgi_format),
+                    chain->desc.Width, chain->desc.Height);
         }
     }
 
