@@ -3677,6 +3677,7 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_CheckFeatureSupport(d3d12_device_i
         case D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS:
         {
             D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS *data = feature_data;
+            HRESULT hr;
 
             if (feature_data_size != sizeof(*data))
             {
@@ -3684,7 +3685,11 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_CheckFeatureSupport(d3d12_device_i
                 return E_INVALIDARG;
             }
 
-            return d3d12_device_check_multisample_quality_levels(device, data);
+            hr = d3d12_device_check_multisample_quality_levels(device, data);
+            if (SUCCEEDED(hr) && vkd3d_should_log_feature_queries())
+                INFO("MULTISAMPLE_QUALITY_LEVELS format %#x, samples %u, flags %#x => quality levels %u.\n",
+                        data->Format, data->SampleCount, data->Flags, data->NumQualityLevels);
+            return hr;
         }
 
         case D3D12_FEATURE_FORMAT_INFO:
