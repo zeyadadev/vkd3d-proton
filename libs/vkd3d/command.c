@@ -8044,10 +8044,10 @@ static void STDMETHODCALLTYPE d3d12_command_list_CopyTextureRegion(d3d12_command
     {
         INFO("CopyTextureRegion: dst %p cookie %016"PRIx64" type %u subresource %u (%u, %u, %u) <- src %p cookie %016"PRIx64" type %u subresource %u box %s, batch type %u.\n",
                 dst->pResource, dst_resource ? dst_resource->res.cookie : 0,
-                dst->Type, dst->Type == D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX ? dst->u.SubresourceIndex : 0,
+                dst->Type, dst->Type == D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX ? dst->SubresourceIndex : 0,
                 dst_x, dst_y, dst_z,
                 src->pResource, src_resource ? src_resource->res.cookie : 0,
-                src->Type, src->Type == D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX ? src->u.SubresourceIndex : 0,
+                src->Type, src->Type == D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX ? src->SubresourceIndex : 0,
                 src_box ? debug_d3d12_box(src_box) : "(null)", copy_info.batch_type);
     }
 
