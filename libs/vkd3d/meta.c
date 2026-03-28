@@ -636,6 +636,14 @@ static HRESULT vkd3d_meta_create_swapchain_pipeline(struct vkd3d_meta_ops *meta_
     return S_OK;
 }
 
+static bool vkd3d_should_force_swapchain_solid_fs(void)
+{
+    char env[64];
+
+    return (vkd3d_get_env_var("VKD3D_FORCE_SWAPCHAIN_SOLID_FS", env, sizeof(env))
+            && strcmp(env, "0") && strcmp(env, "false") && strcmp(env, "FALSE"));
+}
+
 static HRESULT vkd3d_meta_create_copy_image_pipeline(struct vkd3d_meta_ops *meta_ops,
         const struct vkd3d_copy_image_pipeline_key *key, struct vkd3d_copy_image_pipeline *pipeline)
 {
@@ -939,7 +947,17 @@ HRESULT vkd3d_swapchain_ops_init(struct vkd3d_swapchain_ops *meta_swapchain_ops,
         goto fail;
     }
 
-    if ((vr = vkd3d_meta_create_shader_module(device, SPIRV_CODE(fs_swapchain_fullscreen), &meta_swapchain_ops->vk_fs_module)) < 0)
+    if (vkd3d_should_force_swapchain_solid_fs())
+    {
+        INFO("Using solid-color swapchain fragment shader for debugging.\n");
+        vr = vkd3d_meta_create_shader_module(device, SPIRV_CODE(fs_swapchain_solid_magenta), &meta_swapchain_ops->vk_fs_module);
+    }
+    else
+    {
+        vr = vkd3d_meta_create_shader_module(device, SPIRV_CODE(fs_swapchain_fullscreen), &meta_swapchain_ops->vk_fs_module);
+    }
+
+    if (vr < 0)
     {
         ERR("Failed to create shader modules, vr %d.\n", vr);
         goto fail;
