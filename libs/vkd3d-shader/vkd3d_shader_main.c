@@ -26,6 +26,40 @@
 #include <stdio.h>
 #include <inttypes.h>
 
+static bool vkd3d_shader_should_log_compile(void)
+{
+    char env[64];
+
+    return ((vkd3d_get_env_var("VKD3D_LOG_SHADER_COMPILE", env, sizeof(env))
+            || vkd3d_get_env_var("VKD3D_LOG_FEATURE_QUERIES", env, sizeof(env)))
+            && strcmp(env, "0") && strcmp(env, "false") && strcmp(env, "FALSE"));
+}
+
+static const char *debug_shader_compile_stage(VkShaderStageFlagBits stage)
+{
+    switch (stage)
+    {
+        case VK_SHADER_STAGE_VERTEX_BIT:
+            return "vertex";
+        case VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT:
+            return "hull";
+        case VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT:
+            return "domain";
+        case VK_SHADER_STAGE_GEOMETRY_BIT:
+            return "geometry";
+        case VK_SHADER_STAGE_FRAGMENT_BIT:
+            return "pixel";
+        case VK_SHADER_STAGE_COMPUTE_BIT:
+            return "compute";
+        case VK_SHADER_STAGE_TASK_BIT_EXT:
+            return "amplification";
+        case VK_SHADER_STAGE_MESH_BIT_EXT:
+            return "mesh";
+        default:
+            return "unknown";
+    }
+}
+
 static void vkd3d_shader_dump_blob(const char *path, vkd3d_shader_hash_t hash, const void *data, size_t size, const char *ext)
 {
     char filename[1024];
@@ -373,6 +407,7 @@ int vkd3d_shader_compile_dxbc(const struct vkd3d_shader_code *dxbc,
     struct vkd3d_dxbc_compiler *spirv_compiler;
     struct vkd3d_shader_scan_info scan_info;
     struct vkd3d_shader_parser parser;
+    VkShaderStageFlagBits stage = shader_interface_info ? shader_interface_info->stage : 0;
     vkd3d_shader_hash_t hash;
     int ret;
 
@@ -382,19 +417,41 @@ int vkd3d_shader_compile_dxbc(const struct vkd3d_shader_code *dxbc,
     if ((ret = vkd3d_shader_validate_compile_args(compile_args)) < 0)
         return ret;
 
+    hash = vkd3d_shader_hash(dxbc);
+    if (vkd3d_shader_should_log_compile())
+    {
+        INFO("Shader compile begin: stage %s, DXBC size %zu, source hash %016"PRIx64".\n",
+                debug_shader_compile_stage(stage), dxbc->size, hash);
+    }
+
     /* DXIL is handled externally through dxil-spirv. */
     if (shader_is_dxil(dxbc->code, dxbc->size))
     {
-        return vkd3d_shader_compile_dxil(dxbc, spirv, spirv_debug, shader_interface_info, compile_args);
+        if (vkd3d_shader_should_log_compile())
+            INFO("Shader compile path: stage %s uses DXIL.\n", debug_shader_compile_stage(stage));
+
+        ret = vkd3d_shader_compile_dxil(dxbc, spirv, spirv_debug, shader_interface_info, compile_args);
+
+        if (vkd3d_shader_should_log_compile())
+        {
+            INFO("Shader compile end: stage %s, path DXIL, ret %d, SPIR-V hash %016"PRIx64", size %zu, flags %#x.\n",
+                    debug_shader_compile_stage(stage), ret, spirv->meta.hash, spirv->size, spirv->meta.flags);
+        }
+
+        return ret;
     }
 
     memset(&spirv->meta, 0, sizeof(spirv->meta));
 
-    hash = vkd3d_shader_hash(dxbc);
     spirv->meta.hash = hash;
     if (vkd3d_shader_replace(hash, &spirv->code, &spirv->size))
     {
         spirv->meta.flags |= VKD3D_SHADER_META_FLAG_REPLACED;
+        if (vkd3d_shader_should_log_compile())
+        {
+            INFO("Shader compile override: stage %s, source hash %016"PRIx64", SPIR-V size %zu.\n",
+                    debug_shader_compile_stage(stage), hash, spirv->size);
+        }
         return VKD3D_OK;
     }
 
@@ -414,6 +471,14 @@ int vkd3d_shader_compile_dxbc(const struct vkd3d_shader_code *dxbc,
     {
         vkd3d_shader_scan_destroy(&scan_info);
         return ret;
+    }
+
+    if (vkd3d_shader_should_log_compile())
+    {
+        INFO("Shader parse: stage %s, type %#x, shader model %u_%u, patch vertices %u.\n",
+                debug_shader_compile_stage(stage), parser.shader_version.type,
+                parser.shader_version.major, parser.shader_version.minor,
+                scan_info.patch_vertex_count);
     }
 
     if (shader_interface_info)
@@ -458,6 +523,12 @@ int vkd3d_shader_compile_dxbc(const struct vkd3d_shader_code *dxbc,
 
     if (ret == 0)
         vkd3d_shader_dump_spirv_shader(hash, spirv);
+
+    if (vkd3d_shader_should_log_compile())
+    {
+        INFO("Shader compile end: stage %s, path DXBC, ret %d, SPIR-V hash %016"PRIx64", size %zu, flags %#x.\n",
+                debug_shader_compile_stage(stage), ret, spirv->meta.hash, spirv->size, spirv->meta.flags);
+    }
 
     if (spirv_debug)
         memset(spirv_debug, 0, sizeof(*spirv_debug));

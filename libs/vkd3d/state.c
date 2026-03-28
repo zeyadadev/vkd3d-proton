@@ -227,6 +227,40 @@ enum vkd3d_shader_visibility vkd3d_shader_visibility_from_d3d12(D3D12_SHADER_VIS
     }
 }
 
+static bool vkd3d_should_log_shader_compile(void)
+{
+    char env[64];
+
+    return ((vkd3d_get_env_var("VKD3D_LOG_SHADER_COMPILE", env, sizeof(env))
+            || vkd3d_get_env_var("VKD3D_LOG_FEATURE_QUERIES", env, sizeof(env)))
+            && strcmp(env, "0") && strcmp(env, "false") && strcmp(env, "FALSE"));
+}
+
+static const char *debug_shader_stage_flag(VkShaderStageFlagBits stage)
+{
+    switch (stage)
+    {
+        case VK_SHADER_STAGE_VERTEX_BIT:
+            return "vertex";
+        case VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT:
+            return "hull";
+        case VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT:
+            return "domain";
+        case VK_SHADER_STAGE_GEOMETRY_BIT:
+            return "geometry";
+        case VK_SHADER_STAGE_FRAGMENT_BIT:
+            return "pixel";
+        case VK_SHADER_STAGE_COMPUTE_BIT:
+            return "compute";
+        case VK_SHADER_STAGE_TASK_BIT_EXT:
+            return "amplification";
+        case VK_SHADER_STAGE_MESH_BIT_EXT:
+            return "mesh";
+        default:
+            return "unknown";
+    }
+}
+
 static VkDescriptorType vk_descriptor_type_from_d3d12_root_parameter(struct d3d12_device *device, D3D12_ROOT_PARAMETER_TYPE type)
 {
     bool use_ssbo = d3d12_device_use_ssbo_root_descriptors(device);
@@ -2500,6 +2534,12 @@ static HRESULT vkd3d_compile_shader_stage(struct d3d12_pipeline_state *state, st
 
     if (!spirv_code->code)
     {
+        if (vkd3d_should_log_shader_compile())
+        {
+            INFO("Stage compile start: %s, DXBC size %zu, sanitized cached SPIR-V hash %016"PRIx64".\n",
+                    debug_shader_stage_flag(stage), dxbc.size, recovered_hash);
+        }
+
         TRACE("Calling vkd3d_shader_compile_dxbc.\n");
 
         d3d12_pipeline_state_init_shader_interface(state, device, stage, &shader_interface);
@@ -2513,11 +2553,23 @@ static HRESULT vkd3d_compile_shader_stage(struct d3d12_pipeline_state *state, st
         }
         TRACE("Called vkd3d_shader_compile_dxbc.\n");
 
+        if (vkd3d_should_log_shader_compile())
+        {
+            INFO("Stage compile done: %s, SPIR-V hash %016"PRIx64", size %zu, flags %#x, patch vertices %u.\n",
+                    debug_shader_stage_flag(stage), spirv_code->meta.hash, spirv_code->size,
+                    spirv_code->meta.flags, spirv_code->meta.patch_vertex_count);
+        }
+
         if (stage == VK_SHADER_STAGE_FRAGMENT_BIT)
         {
             /* At this point we don't need the map anymore. */
             vkd3d_shader_stage_io_map_free(&state->graphics.cached_desc.stage_io_map_ms_ps);
         }
+    }
+    else if (vkd3d_should_log_shader_compile())
+    {
+        INFO("Stage compile skipped: %s reusing cached SPIR-V hash %016"PRIx64", size %zu, flags %#x.\n",
+                debug_shader_stage_flag(stage), spirv_code->meta.hash, spirv_code->size, spirv_code->meta.flags);
     }
 
     /* Debug compare SPIR-V we got from cache, and SPIR-V we got from compilation. */
