@@ -79,6 +79,52 @@ static inline void d3d12_command_list_ensure_transfer_batch(struct d3d12_command
 
 static void d3d12_command_list_flush_query_resolves(struct d3d12_command_list *list);
 
+static bool vkd3d_should_log_runtime_commands(void)
+{
+    char env[64];
+
+    return ((vkd3d_get_env_var("VKD3D_LOG_RUNTIME_COMMANDS", env, sizeof(env))
+            || vkd3d_get_env_var("VKD3D_LOG_FEATURE_QUERIES", env, sizeof(env)))
+            && strcmp(env, "0") && strcmp(env, "false") && strcmp(env, "FALSE"));
+}
+
+static bool vkd3d_should_emit_runtime_command_log(void)
+{
+    static LONG runtime_command_log_count;
+
+    if (!vkd3d_should_log_runtime_commands())
+        return false;
+
+    return InterlockedIncrement(&runtime_command_log_count) <= 512;
+}
+
+static void vkd3d_log_runtime_rt_bindings(const struct d3d12_command_list *list, unsigned int render_target_descriptor_count)
+{
+    unsigned int i;
+
+    if (!vkd3d_should_emit_runtime_command_log())
+        return;
+
+    INFO("OMSetRenderTargets: %u RTV(s), DSV %s, framebuffer %ux%u layers %u.\n",
+            render_target_descriptor_count,
+            list->dsv.resource ? debug_dxgi_format(list->dsv.format->dxgi_format) : "NULL",
+            list->fb_width, list->fb_height, list->fb_layer_count);
+
+    for (i = 0; i < render_target_descriptor_count; ++i)
+    {
+        if (list->rtvs[i].resource)
+        {
+            INFO("  RTV[%u]: format %s, %ux%u layers %u.\n",
+                    i, debug_dxgi_format(list->rtvs[i].format->dxgi_format),
+                    list->rtvs[i].width, list->rtvs[i].height, list->rtvs[i].layer_count);
+        }
+        else
+        {
+            INFO("  RTV[%u]: NULL.\n", i);
+        }
+    }
+}
+
 static HRESULT vkd3d_create_binary_semaphore(struct d3d12_device *device, VkSemaphore *vk_semaphore)
 {
     const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
@@ -6521,6 +6567,13 @@ static void STDMETHODCALLTYPE d3d12_command_list_DrawInstanced(d3d12_command_lis
         return;
     }
 
+    if (vkd3d_should_emit_runtime_command_log())
+    {
+        INFO("DrawInstanced: vertices %u, instances %u, first vertex %u, first instance %u, fb %ux%u.\n",
+                vertex_count_per_instance, instance_count, start_vertex_location,
+                start_instance_location, list->fb_width, list->fb_height);
+    }
+
     if (!list->predicate_va)
         VK_CALL(vkCmdDraw(list->vk_command_buffer, vertex_count_per_instance,
                 instance_count, start_vertex_location, start_instance_location));
@@ -6596,6 +6649,13 @@ static void STDMETHODCALLTYPE d3d12_command_list_DrawIndexedInstanced(d3d12_comm
         return;
     }
 
+    if (vkd3d_should_emit_runtime_command_log())
+    {
+        INFO("DrawIndexedInstanced: indices %u, instances %u, first index %u, base vertex %d, first instance %u, fb %ux%u.\n",
+                index_count_per_instance, instance_count, start_vertex_location,
+                base_vertex_location, start_instance_location, list->fb_width, list->fb_height);
+    }
+
     d3d12_command_list_check_index_buffer_strip_cut_value(list);
 
     if (!list->predicate_va)
@@ -6638,6 +6698,11 @@ static void STDMETHODCALLTYPE d3d12_command_list_Dispatch(d3d12_command_list_ifa
     {
         WARN("Failed to update compute state, ignoring dispatch.\n");
         return;
+    }
+
+    if (vkd3d_should_emit_runtime_command_log())
+    {
+        INFO("Dispatch: groups %u x %u x %u.\n", x, y, z);
     }
 
     if (!list->predicate_va)
@@ -7472,6 +7537,13 @@ static void STDMETHODCALLTYPE d3d12_command_list_CopyTextureRegion(d3d12_command
     if (!d3d12_command_list_init_copy_texture_region(list, dst, dst_x, dst_y, dst_z, src, src_box, &copy_info))
         return;
 
+    if (vkd3d_should_emit_runtime_command_log())
+    {
+        INFO("CopyTextureRegion: dst %p (%u, %u, %u) <- src %p box %s, batch type %u.\n",
+                dst->pResource, dst_x, dst_y, dst_z, src->pResource,
+                src_box ? debug_d3d12_box(src_box) : "(null)", copy_info.batch_type);
+    }
+
     d3d12_command_list_ensure_transfer_batch(list, copy_info.batch_type);
 
     alias = false;
@@ -7547,6 +7619,15 @@ static void STDMETHODCALLTYPE d3d12_command_list_CopyResource(d3d12_command_list
 
     d3d12_command_list_end_current_render_pass(list, false);
     d3d12_command_list_end_transfer_batch(list);
+
+    if (vkd3d_should_emit_runtime_command_log())
+    {
+        INFO("CopyResource: dst %p (%s) <- src %p (%s).\n",
+                dst_resource,
+                dst_resource->format ? debug_dxgi_format(dst_resource->format->dxgi_format) : "UNKNOWN",
+                src_resource,
+                src_resource->format ? debug_dxgi_format(src_resource->format->dxgi_format) : "UNKNOWN");
+    }
 
     if (d3d12_resource_is_buffer(dst_resource))
     {
@@ -9689,6 +9770,8 @@ static void STDMETHODCALLTYPE d3d12_command_list_OMSetRenderTargets(d3d12_comman
             list->dynamic_state.dirty_flags |= VKD3D_DYNAMIC_STATE_STENCIL_WRITE_MASK;
         list->dynamic_state.dsv_plane_write_enable = next_dsv_plane_write_enable;
     }
+
+    vkd3d_log_runtime_rt_bindings(list, render_target_descriptor_count);
 }
 
 static bool d3d12_rect_fully_covers_region(const D3D12_RECT *a, const D3D12_RECT *b)
@@ -9794,6 +9877,12 @@ static void STDMETHODCALLTYPE d3d12_command_list_ClearDepthStencilView(d3d12_com
         return;
     }
 
+    if (vkd3d_should_emit_runtime_command_log())
+    {
+        INFO("ClearDepthStencilView: format %s, aspects %#x, depth %.8e, stencil %#x, rects %u.\n",
+                debug_dxgi_format(dsv_desc->format->dxgi_format), clear_aspects, depth, stencil, rect_count);
+    }
+
     d3d12_command_list_clear_attachment(list, dsv_desc->resource, dsv_desc->view,
             clear_aspects, &clear_value, rect_count, rects);
 }
@@ -9828,6 +9917,13 @@ static void STDMETHODCALLTYPE d3d12_command_list_ClearRenderTargetView(d3d12_com
         clear_value.color.float32[1] = color[1];
         clear_value.color.float32[2] = color[2];
         clear_value.color.float32[3] = color[3];
+    }
+
+    if (vkd3d_should_emit_runtime_command_log())
+    {
+        INFO("ClearRenderTargetView: format %s, color [%g, %g, %g, %g], rects %u.\n",
+                debug_dxgi_format(rtv_desc->format->dxgi_format),
+                color[0], color[1], color[2], color[3], rect_count);
     }
 
     d3d12_command_list_clear_attachment(list, rtv_desc->resource, rtv_desc->view,
