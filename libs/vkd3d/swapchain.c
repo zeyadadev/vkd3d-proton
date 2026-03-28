@@ -179,6 +179,14 @@ static bool vkd3d_should_force_swapchain_magenta(void)
             && strcmp(env, "0") && strcmp(env, "false") && strcmp(env, "FALSE"));
 }
 
+static bool vkd3d_should_force_swapchain_source_barrier(void)
+{
+    char env[64];
+
+    return (vkd3d_get_env_var("VKD3D_FORCE_SWAPCHAIN_SOURCE_BARRIER", env, sizeof(env))
+            && strcmp(env, "0") && strcmp(env, "false") && strcmp(env, "FALSE"));
+}
+
 static void dxgi_vk_swap_chain_drain_queue(struct dxgi_vk_swap_chain *chain)
 {
     const struct vkd3d_vk_device_procs *vk_procs = &chain->queue->device->vk_procs;
@@ -1471,15 +1479,17 @@ static void dxgi_vk_swap_chain_present_signal_blit_semaphore(struct dxgi_vk_swap
 static void dxgi_vk_swap_chain_record_render_pass(struct dxgi_vk_swap_chain *chain, VkCommandBuffer vk_cmd, uint32_t swapchain_index)
 {
     const struct vkd3d_vk_device_procs *vk_procs = &chain->queue->device->vk_procs;
+    VkImageMemoryBarrier2 image_barriers[2];
     VkRenderingAttachmentInfo attachment_info;
-    VkImageMemoryBarrier2 image_barrier;
     VkDescriptorImageInfo image_info;
     VkWriteDescriptorSet write_info;
     struct d3d12_resource *resource;
     VkRenderingInfo rendering_info;
     VkDependencyInfo dep_info;
     VkViewport viewport;
+    VkImageLayout source_layout;
     bool force_swapchain_magenta;
+    bool force_source_barrier;
     bool blank_present;
 
     /* If application intends to present before we have rendered to it,
@@ -1487,6 +1497,8 @@ static void dxgi_vk_swap_chain_record_render_pass(struct dxgi_vk_swap_chain *cha
     resource = chain->user.backbuffers[chain->request.user_index];
     blank_present = vkd3d_atomic_uint32_load_explicit(&resource->initial_layout_transition, vkd3d_memory_order_relaxed) != 0;
     force_swapchain_magenta = vkd3d_should_force_swapchain_magenta();
+    force_source_barrier = vkd3d_should_force_swapchain_source_barrier();
+    source_layout = d3d12_resource_pick_layout(resource, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
     if (blank_present)
         WARN("Application is presenting user index %u, but it has never been rendered to.\n", chain->request.user_index);
@@ -1542,20 +1554,41 @@ static void dxgi_vk_swap_chain_record_render_pass(struct dxgi_vk_swap_chain *cha
     memset(&dep_info, 0, sizeof(dep_info));
     dep_info.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
     dep_info.imageMemoryBarrierCount = 1;
-    dep_info.pImageMemoryBarriers = &image_barrier;
+    dep_info.pImageMemoryBarriers = image_barriers;
 
     /* srcStage = NONE since we're using fences to acquire WSI. */
-    memset(&image_barrier, 0, sizeof(image_barrier));
-    image_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-    image_barrier.dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
-    image_barrier.dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
-    image_barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    image_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    image_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    image_barrier.image = chain->present.vk_backbuffer_images[swapchain_index];
-    image_barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    image_barrier.subresourceRange.levelCount = 1;
-    image_barrier.subresourceRange.layerCount = 1;
+    memset(image_barriers, 0, sizeof(image_barriers));
+    image_barriers[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    image_barriers[0].dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+    image_barriers[0].dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+    image_barriers[0].newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    image_barriers[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    image_barriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    image_barriers[0].image = chain->present.vk_backbuffer_images[swapchain_index];
+    image_barriers[0].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    image_barriers[0].subresourceRange.levelCount = 1;
+    image_barriers[0].subresourceRange.layerCount = 1;
+
+    if (!blank_present && force_source_barrier)
+    {
+        image_barriers[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        image_barriers[1].srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        image_barriers[1].srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+        image_barriers[1].dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+        image_barriers[1].dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+        image_barriers[1].oldLayout = source_layout;
+        image_barriers[1].newLayout = source_layout;
+        image_barriers[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        image_barriers[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        image_barriers[1].image = resource->res.vk_image;
+        image_barriers[1].subresourceRange.aspectMask = resource->format->vk_aspect_mask;
+        image_barriers[1].subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS;
+        image_barriers[1].subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
+        dep_info.imageMemoryBarrierCount = 2;
+
+        INFO("Forcing explicit source barrier for swapchain blit user image %u (layout %#x).\n",
+                chain->request.user_index, source_layout);
+    }
 
     if ((vkd3d_config_flags & VKD3D_CONFIG_FLAG_DEBUG_UTILS) &&
             chain->queue->device->vk_info.EXT_debug_utils)
@@ -1592,7 +1625,7 @@ static void dxgi_vk_swap_chain_record_render_pass(struct dxgi_vk_swap_chain *cha
         write_info.dstArrayElement = 0;
         write_info.descriptorCount = 1;
         image_info.imageView = chain->user.vk_image_views[chain->request.user_index];
-        image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        image_info.imageLayout = source_layout;
         image_info.sampler = VK_NULL_HANDLE;
 
         VK_CALL(vkCmdPushDescriptorSetKHR(vk_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -1603,12 +1636,13 @@ static void dxgi_vk_swap_chain_record_render_pass(struct dxgi_vk_swap_chain *cha
 
     VK_CALL(vkCmdEndRendering(vk_cmd));
 
-    image_barrier.srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
-    image_barrier.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
-    image_barrier.dstStageMask = VK_PIPELINE_STAGE_2_NONE;
-    image_barrier.dstAccessMask = VK_ACCESS_2_NONE;
-    image_barrier.oldLayout = image_barrier.newLayout;
-    image_barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    image_barriers[0].srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+    image_barriers[0].srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+    image_barriers[0].dstStageMask = VK_PIPELINE_STAGE_2_NONE;
+    image_barriers[0].dstAccessMask = VK_ACCESS_2_NONE;
+    image_barriers[0].oldLayout = image_barriers[0].newLayout;
+    image_barriers[0].newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    dep_info.imageMemoryBarrierCount = 1;
 
     VK_CALL(vkCmdPipelineBarrier2(vk_cmd, &dep_info));
 
