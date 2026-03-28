@@ -69,6 +69,9 @@ static const struct vkd3d_optional_extension_info optional_device_extensions[] =
     VK_EXTENSION(KHR_FRAGMENT_SHADER_BARYCENTRIC, KHR_fragment_shader_barycentric),
     VK_EXTENSION(KHR_PRESENT_ID, KHR_present_id),
     VK_EXTENSION(KHR_PRESENT_WAIT, KHR_present_wait),
+#ifdef VK_KHR_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME
+    VK_EXTENSION(KHR_VERTEX_ATTRIBUTE_DIVISOR, KHR_vertex_attribute_divisor),
+#endif
 #ifdef _WIN32
     VK_EXTENSION(KHR_EXTERNAL_MEMORY_WIN32, KHR_external_memory_win32),
     VK_EXTENSION(KHR_EXTERNAL_SEMAPHORE_WIN32, KHR_external_semaphore_win32),
@@ -1374,7 +1377,7 @@ static void vkd3d_physical_device_info_init(struct vkd3d_physical_device_info *i
         vk_prepend_struct(&info->properties2, &info->xfb_properties);
     }
 
-    if (vulkan_info->EXT_vertex_attribute_divisor)
+    if (vulkan_info->EXT_vertex_attribute_divisor || vulkan_info->KHR_vertex_attribute_divisor)
     {
         info->vertex_divisor_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT;
         vk_prepend_struct(&info->features2, &info->vertex_divisor_features);
@@ -2035,8 +2038,12 @@ static HRESULT vkd3d_init_device_extensions(struct d3d12_device *device,
             create_info->optional_device_extension_count,
             user_extension_supported, vulkan_info, "device");
 
-    if (get_spec_version(vk_extensions, count, VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME) < 3)
+    if (vulkan_info->EXT_vertex_attribute_divisor &&
+            get_spec_version(vk_extensions, count, VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME) < 3)
         vulkan_info->EXT_vertex_attribute_divisor = false;
+
+    if (vulkan_info->EXT_vertex_attribute_divisor)
+        vulkan_info->KHR_vertex_attribute_divisor = false;
 
     vkd3d_free(vk_extensions);
     return S_OK;
