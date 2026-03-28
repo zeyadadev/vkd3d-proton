@@ -835,6 +835,92 @@ static const char *vkd3d_runtime_stage_name(VkShaderStageFlagBits stage)
     }
 }
 
+static const char *vkd3d_runtime_debug_vk_compare_op(VkCompareOp op)
+{
+    switch (op)
+    {
+        case VK_COMPARE_OP_NEVER:
+            return "NEVER";
+        case VK_COMPARE_OP_LESS:
+            return "LESS";
+        case VK_COMPARE_OP_EQUAL:
+            return "EQUAL";
+        case VK_COMPARE_OP_LESS_OR_EQUAL:
+            return "LEQUAL";
+        case VK_COMPARE_OP_GREATER:
+            return "GREATER";
+        case VK_COMPARE_OP_NOT_EQUAL:
+            return "NOT_EQUAL";
+        case VK_COMPARE_OP_GREATER_OR_EQUAL:
+            return "GEQUAL";
+        case VK_COMPARE_OP_ALWAYS:
+            return "ALWAYS";
+        default:
+            return "?";
+    }
+}
+
+static const char *vkd3d_runtime_debug_vk_cull_mode(VkCullModeFlags mode)
+{
+    switch (mode)
+    {
+        case VK_CULL_MODE_NONE:
+            return "NONE";
+        case VK_CULL_MODE_FRONT_BIT:
+            return "FRONT";
+        case VK_CULL_MODE_BACK_BIT:
+            return "BACK";
+        case VK_CULL_MODE_FRONT_AND_BACK:
+            return "FRONT_AND_BACK";
+        default:
+            return "?";
+    }
+}
+
+static const char *vkd3d_runtime_debug_vk_front_face(VkFrontFace face)
+{
+    switch (face)
+    {
+        case VK_FRONT_FACE_COUNTER_CLOCKWISE:
+            return "CCW";
+        case VK_FRONT_FACE_CLOCKWISE:
+            return "CW";
+        default:
+            return "?";
+    }
+}
+
+static const char *vkd3d_runtime_debug_vk_primitive_topology(VkPrimitiveTopology topology)
+{
+    switch (topology)
+    {
+        case VK_PRIMITIVE_TOPOLOGY_POINT_LIST:
+            return "POINT_LIST";
+        case VK_PRIMITIVE_TOPOLOGY_LINE_LIST:
+            return "LINE_LIST";
+        case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP:
+            return "LINE_STRIP";
+        case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST:
+            return "TRIANGLE_LIST";
+        case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP:
+            return "TRIANGLE_STRIP";
+        case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN:
+            return "TRIANGLE_FAN";
+        case VK_PRIMITIVE_TOPOLOGY_LINE_LIST_WITH_ADJACENCY:
+            return "LINE_LIST_ADJ";
+        case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP_WITH_ADJACENCY:
+            return "LINE_STRIP_ADJ";
+        case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST_WITH_ADJACENCY:
+            return "TRIANGLE_LIST_ADJ";
+        case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP_WITH_ADJACENCY:
+            return "TRIANGLE_STRIP_ADJ";
+        case VK_PRIMITIVE_TOPOLOGY_PATCH_LIST:
+            return "PATCH_LIST";
+        default:
+            return "?";
+    }
+}
+
 static const char *vkd3d_runtime_debug_shader_descriptor_type(enum vkd3d_shader_descriptor_type type)
 {
     switch (type)
@@ -969,6 +1055,8 @@ static void vkd3d_log_runtime_graphics_state(const struct d3d12_command_list *li
     const struct d3d12_pipeline_state *state = list->state;
     const struct vkd3d_pipeline_bindings *bindings = &list->graphics_bindings;
     const struct d3d12_root_signature *root_signature = bindings->root_signature;
+    const struct d3d12_graphics_pipeline_state *graphics;
+    const struct vkd3d_dynamic_state *dynamic_state = &list->dynamic_state;
     uint64_t descriptor_table_mask;
     uint64_t root_descriptor_mask;
     unsigned int root_parameter_index;
@@ -979,6 +1067,8 @@ static void vkd3d_log_runtime_graphics_state(const struct d3d12_command_list *li
         INFO("  Runtime draw state: no graphics PSO is currently bound.\n");
         return;
     }
+
+    graphics = &state->graphics;
 
     INFO("  Graphics PSO %p, pipeline type %u, root signature %p, descriptor buffers %s, heap view %s.\n",
             state, state->pipeline_type, root_signature,
@@ -994,6 +1084,40 @@ static void vkd3d_log_runtime_graphics_state(const struct d3d12_command_list *li
                         state->graphics.code_debug[i].debug_entry_point_name : "N/A",
                 (state->graphics.code[i].meta.flags & VKD3D_SHADER_META_FLAG_REPLACED) ? "yes" : "no");
     }
+
+    INFO("  Dynamic state: D3D topology %#x, VK topology %s, viewport count %u, active flags %#x, dirty flags %#x.\n",
+            dynamic_state->primitive_topology,
+            vkd3d_runtime_debug_vk_primitive_topology(dynamic_state->vk_primitive_topology),
+            dynamic_state->viewport_count, dynamic_state->active_flags, dynamic_state->dirty_flags);
+
+    if (dynamic_state->viewport_count)
+    {
+        const VkViewport *viewport = &dynamic_state->viewports[0];
+        const VkRect2D *scissor = &dynamic_state->scissors[0];
+
+        INFO("  Viewport[0]: x %.3f y %.3f w %.3f h %.3f depth [%.3f, %.3f], Scissor[0]: (%d, %d) %ux%u.\n",
+                viewport->x, viewport->y, viewport->width, viewport->height,
+                viewport->minDepth, viewport->maxDepth,
+                scissor->offset.x, scissor->offset.y,
+                scissor->extent.width, scissor->extent.height);
+    }
+    else
+    {
+        INFO("  No active viewport; rasterization uses the dummy viewport/scissor path.\n");
+    }
+
+    INFO("  Raster state: cull %s, front face %s, depth bias enable %u, line width %.3f, samples %u, alpha-to-coverage %u.\n",
+            vkd3d_runtime_debug_vk_cull_mode(graphics->rs_desc.cullMode),
+            vkd3d_runtime_debug_vk_front_face(graphics->rs_desc.frontFace),
+            graphics->rs_desc.depthBiasEnable, graphics->rs_desc.lineWidth,
+            graphics->ms_desc.rasterizationSamples, graphics->ms_desc.alphaToCoverageEnable);
+    INFO("  Depth/stencil: depth test %u, depth write %u, compare %s, stencil test %u, stencil ref %u, stencil write mask %#x, depth bounds [%.3f, %.3f], DSV plane writes %#x.\n",
+            graphics->ds_desc.depthTestEnable, graphics->ds_desc.depthWriteEnable,
+            vkd3d_runtime_debug_vk_compare_op(graphics->ds_desc.depthCompareOp),
+            graphics->ds_desc.stencilTestEnable, dynamic_state->stencil_reference,
+            dynamic_state->stencil_write_mask,
+            dynamic_state->min_depth_bounds, dynamic_state->max_depth_bounds,
+            dynamic_state->dsv_plane_write_enable);
 
     if (!root_signature)
     {
