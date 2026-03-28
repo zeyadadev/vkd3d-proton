@@ -762,6 +762,197 @@ static const struct vkd3d_shader_root_parameter *root_signature_get_root_descrip
     return p;
 }
 
+static const char *vkd3d_runtime_debug_root_parameter_type(D3D12_ROOT_PARAMETER_TYPE type)
+{
+    switch (type)
+    {
+        case D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE:
+            return "TABLE";
+        case D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS:
+            return "CONST";
+        case D3D12_ROOT_PARAMETER_TYPE_CBV:
+            return "CBV";
+        case D3D12_ROOT_PARAMETER_TYPE_SRV:
+            return "SRV";
+        case D3D12_ROOT_PARAMETER_TYPE_UAV:
+            return "UAV";
+        default:
+            return "UNKNOWN";
+    }
+}
+
+static const char *vkd3d_runtime_debug_vk_descriptor_type(VkDescriptorType type)
+{
+    switch (type)
+    {
+        case VK_DESCRIPTOR_TYPE_SAMPLER:
+            return "SAMPLER";
+        case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
+            return "COMBINED_IMAGE_SAMPLER";
+        case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
+            return "SAMPLED_IMAGE";
+        case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
+            return "STORAGE_IMAGE";
+        case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
+            return "UNIFORM_TEXEL_BUFFER";
+        case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
+            return "STORAGE_TEXEL_BUFFER";
+        case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
+            return "UNIFORM_BUFFER";
+        case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
+            return "STORAGE_BUFFER";
+        case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
+            return "UNIFORM_BUFFER_DYNAMIC";
+        case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
+            return "STORAGE_BUFFER_DYNAMIC";
+        default:
+            return "OTHER";
+    }
+}
+
+static const char *vkd3d_runtime_stage_name(VkShaderStageFlagBits stage)
+{
+    switch (stage)
+    {
+        case VK_SHADER_STAGE_VERTEX_BIT:
+            return "VS";
+        case VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT:
+            return "HS";
+        case VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT:
+            return "DS";
+        case VK_SHADER_STAGE_GEOMETRY_BIT:
+            return "GS";
+        case VK_SHADER_STAGE_FRAGMENT_BIT:
+            return "PS";
+        case VK_SHADER_STAGE_TASK_BIT_EXT:
+            return "AS";
+        case VK_SHADER_STAGE_MESH_BIT_EXT:
+            return "MS";
+        case VK_SHADER_STAGE_COMPUTE_BIT:
+            return "CS";
+        default:
+            return "?";
+    }
+}
+
+static void vkd3d_log_runtime_graphics_state(const struct d3d12_command_list *list)
+{
+    const struct d3d12_pipeline_state *state = list->state;
+    const struct vkd3d_pipeline_bindings *bindings = &list->graphics_bindings;
+    const struct d3d12_root_signature *root_signature = bindings->root_signature;
+    uint64_t descriptor_table_mask;
+    uint64_t root_descriptor_mask;
+    unsigned int root_parameter_index;
+    size_t i;
+
+    if (!state || !d3d12_pipeline_state_is_graphics(state))
+    {
+        INFO("  Runtime draw state: no graphics PSO is currently bound.\n");
+        return;
+    }
+
+    INFO("  Graphics PSO %p, pipeline type %u, root signature %p, descriptor buffers %s, heap view %s.\n",
+            state, state->pipeline_type, root_signature,
+            d3d12_device_uses_descriptor_buffers(list->device) ? "yes" : "no",
+            list->cbv_srv_uav_descriptors_view ? "ready" : "NULL");
+
+    for (i = 0; i < state->graphics.stage_count; ++i)
+    {
+        INFO("  Stage %s: hash %016"PRIx64", entry \"%s\", replaced %s.\n",
+                vkd3d_runtime_stage_name(state->graphics.cached_desc.bytecode_stages[i]),
+                state->graphics.code[i].meta.hash,
+                state->graphics.code_debug[i].debug_entry_point_name ?
+                        state->graphics.code_debug[i].debug_entry_point_name : "N/A",
+                (state->graphics.code[i].meta.flags & VKD3D_SHADER_META_FLAG_REPLACED) ? "yes" : "no");
+    }
+
+    if (!root_signature)
+    {
+        INFO("  Graphics bindings: no root signature bound.\n");
+        return;
+    }
+
+    INFO("  Graphics bindings: RS hash %016"PRIx64", dirty flags %#x, tables active %#"PRIx64", heap dirty %#"PRIx64", root descriptors active %#"PRIx64" dirty %#"PRIx64", root constants dirty %#"PRIx64", hoisted %u.\n",
+            root_signature->compatibility_hash,
+            bindings->dirty_flags, bindings->descriptor_table_active_mask,
+            bindings->descriptor_heap_dirty_mask, bindings->root_descriptor_active_mask,
+            bindings->root_descriptor_dirty_mask, bindings->root_constant_dirty_mask,
+            root_signature->hoist_info.num_desc);
+
+    if (d3d12_device_uses_descriptor_buffers(list->device))
+    {
+        INFO("  Descriptor buffer offsets: resource %#"PRIx64", sampler %#"PRIx64", heap dirty %u.\n",
+                (uint64_t)list->descriptor_heap.buffers.vk_offsets[0],
+                (uint64_t)list->descriptor_heap.buffers.vk_offsets[1],
+                list->descriptor_heap.buffers.heap_dirty);
+    }
+
+    descriptor_table_mask = root_signature->descriptor_table_mask & bindings->descriptor_table_active_mask;
+    if (descriptor_table_mask)
+    {
+        while (descriptor_table_mask)
+        {
+            const struct vkd3d_shader_descriptor_table *table;
+
+            root_parameter_index = vkd3d_bitmask_iter64(&descriptor_table_mask);
+            table = root_signature_get_descriptor_table(root_signature, root_parameter_index);
+            INFO("  Descriptor table p%u -> table %u offset %u.\n",
+                    root_parameter_index, table->table_index,
+                    bindings->descriptor_tables[root_parameter_index]);
+        }
+    }
+    else if (root_signature->descriptor_table_count)
+    {
+        INFO("  No active descriptor tables.\n");
+    }
+
+    root_descriptor_mask = bindings->root_descriptor_active_mask &
+            (root_signature->root_descriptor_raw_va_mask | root_signature->root_descriptor_push_mask);
+    if (root_descriptor_mask)
+    {
+        while (root_descriptor_mask)
+        {
+            const struct vkd3d_shader_root_parameter *root_parameter;
+            const struct vkd3d_root_descriptor_info *descriptor;
+
+            root_parameter_index = vkd3d_bitmask_iter64(&root_descriptor_mask);
+            root_parameter = root_signature_get_parameter(root_signature, root_parameter_index);
+            descriptor = &bindings->root_descriptors[root_parameter_index];
+
+            if (root_signature->root_descriptor_raw_va_mask & (1ull << root_parameter_index))
+            {
+                INFO("  Root descriptor p%u (%s/raw VA): %#"PRIx64".\n",
+                        root_parameter_index,
+                        vkd3d_runtime_debug_root_parameter_type(root_parameter->parameter_type),
+                        descriptor->info.va);
+            }
+            else if (descriptor->vk_descriptor_type == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER ||
+                    descriptor->vk_descriptor_type == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER)
+            {
+                INFO("  Root descriptor p%u (%s/%s): buffer view %p.\n",
+                        root_parameter_index,
+                        vkd3d_runtime_debug_root_parameter_type(root_parameter->parameter_type),
+                        vkd3d_runtime_debug_vk_descriptor_type(descriptor->vk_descriptor_type),
+                        (void *)(uintptr_t)descriptor->info.buffer_view);
+            }
+            else
+            {
+                INFO("  Root descriptor p%u (%s/%s): buffer %p offset %#"PRIx64" range %#"PRIx64".\n",
+                        root_parameter_index,
+                        vkd3d_runtime_debug_root_parameter_type(root_parameter->parameter_type),
+                        vkd3d_runtime_debug_vk_descriptor_type(descriptor->vk_descriptor_type),
+                        (void *)(uintptr_t)descriptor->info.buffer.buffer,
+                        (uint64_t)descriptor->info.buffer.offset,
+                        (uint64_t)descriptor->info.buffer.range);
+            }
+        }
+    }
+    else if (root_signature->root_descriptor_raw_va_mask || root_signature->root_descriptor_push_mask)
+    {
+        INFO("  No active root descriptors.\n");
+    }
+}
+
 /* ID3D12Fence */
 static void d3d12_fence_destroy_vk_objects(struct d3d12_fence *fence)
 {
@@ -6572,6 +6763,7 @@ static void STDMETHODCALLTYPE d3d12_command_list_DrawInstanced(d3d12_command_lis
         INFO("DrawInstanced: vertices %u, instances %u, first vertex %u, first instance %u, fb %ux%u.\n",
                 vertex_count_per_instance, instance_count, start_vertex_location,
                 start_instance_location, list->fb_width, list->fb_height);
+        vkd3d_log_runtime_graphics_state(list);
     }
 
     if (!list->predicate_va)
@@ -6654,6 +6846,7 @@ static void STDMETHODCALLTYPE d3d12_command_list_DrawIndexedInstanced(d3d12_comm
         INFO("DrawIndexedInstanced: indices %u, instances %u, first index %u, base vertex %d, first instance %u, fb %ux%u.\n",
                 index_count_per_instance, instance_count, start_vertex_location,
                 base_vertex_location, start_instance_location, list->fb_width, list->fb_height);
+        vkd3d_log_runtime_graphics_state(list);
     }
 
     d3d12_command_list_check_index_buffer_strip_cut_value(list);
